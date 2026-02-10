@@ -150,6 +150,54 @@ void xgui_display_cleanup(void) {
 }
 
 /*
+ * Reinitialize display after a VESA mode change.
+ * Reallocates backbuffer and dirty lines for the new resolution.
+ */
+int xgui_display_reinit(void) {
+    if (!display.initialized) return -1;
+
+    vesa_info_t* vesa = vesa_get_info();
+
+    /* Free old buffers */
+    if (display.backbuffer) kfree(display.backbuffer);
+    if (display.dirty_lines) kfree(display.dirty_lines);
+
+    /* Update display state from VESA */
+    display.framebuffer = vesa->framebuffer;
+    display.width = vesa->width;
+    display.height = vesa->height;
+    display.pitch = vesa->pitch;
+    display.bpp = (int)vesa->bpp;
+    display.bytes_per_pixel = (int)vesa->bytes_per_pixel;
+
+    /* Allocate new backbuffer */
+    uint32_t buffer_size = display.width * display.height * sizeof(uint32_t);
+    display.backbuffer = (uint32_t*)kmalloc(buffer_size);
+    if (!display.backbuffer) {
+        serial_write_string("XGUI: display_reinit - kmalloc backbuffer failed\n");
+        display.initialized = false;
+        return -1;
+    }
+
+    /* Allocate new dirty line flags */
+    display.dirty_lines = (bool*)kmalloc(display.height * sizeof(bool));
+    if (!display.dirty_lines) {
+        serial_write_string("XGUI: display_reinit - kmalloc dirty_lines failed\n");
+        kfree(display.backbuffer);
+        display.backbuffer = NULL;
+        display.initialized = false;
+        return -1;
+    }
+
+    /* Clear and mark all dirty */
+    memset(display.backbuffer, 0, buffer_size);
+    memset(display.dirty_lines, 1, display.height * sizeof(bool));
+
+    serial_write_string("XGUI: display_reinit OK\n");
+    return 0;
+}
+
+/*
  * Check if display is available
  */
 bool xgui_display_available(void) {

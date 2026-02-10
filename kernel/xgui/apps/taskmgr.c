@@ -9,6 +9,7 @@
 #include "xgui/widget.h"
 #include "xgui/theme.h"
 #include "heap.h"
+#include "pmm.h"
 #include "string.h"
 #include "stdio.h"
 #include "timer.h"
@@ -162,14 +163,14 @@ static void tm_paint(xgui_window_t* win) {
     xgui_win_hline(win, 6, info_y, cw - 12, XGUI_DARK_GRAY);
     xgui_win_text_transparent(win, 8, info_y + 6, "System Memory", XGUI_BLACK);
 
-    heap_stats_t stats;
-    heap_get_stats(&stats);
+    pmm_stats_t pmm;
+    pmm_get_stats(&pmm);
 
     char line[64];
     char total_str[16], used_str[16], free_str[16];
-    format_kb(stats.total_size / 1024, total_str, sizeof(total_str));
-    format_kb(stats.used_size / 1024, used_str, sizeof(used_str));
-    format_kb(stats.free_size / 1024, free_str, sizeof(free_str));
+    format_kb(pmm.total_memory / 1024, total_str, sizeof(total_str));
+    format_kb((pmm.used_frames * PAGE_SIZE) / 1024, used_str, sizeof(used_str));
+    format_kb(pmm.free_memory / 1024, free_str, sizeof(free_str));
 
     snprintf(line, sizeof(line), "Total: %s", total_str);
     xgui_win_text_transparent(win, 8, info_y + 22, line, XGUI_BLACK);
@@ -190,19 +191,19 @@ static void tm_paint(xgui_window_t* win) {
 
     /* Used portion */
     int used_w = 0;
-    if (stats.total_size > 0) {
-        /* Use KB to avoid 64-bit overflow */
-        uint32_t used_kb = stats.used_size / 1024;
-        uint32_t total_kb = stats.total_size / 1024;
+    if (pmm.total_memory > 0) {
+        uint32_t used_kb = (pmm.used_frames * PAGE_SIZE) / 1024;
+        uint32_t total_kb = pmm.total_memory / 1024;
         if (total_kb > 0) {
             used_w = (int)((bar_w - 4) * used_kb / total_kb);
         }
     }
     if (used_w > 0) {
         uint32_t bar_color = XGUI_RGB(60, 160, 60);
-        if (stats.used_size > stats.total_size * 3 / 4) {
+        uint32_t used_mem = pmm.used_frames * PAGE_SIZE;
+        if (used_mem > pmm.total_memory * 3 / 4) {
             bar_color = XGUI_RGB(200, 60, 60);
-        } else if (stats.used_size > stats.total_size / 2) {
+        } else if (used_mem > pmm.total_memory / 2) {
             bar_color = XGUI_RGB(200, 180, 40);
         }
         xgui_win_rect_filled(win, bar_x + 2, bar_y + 2, used_w, bar_h - 4, bar_color);

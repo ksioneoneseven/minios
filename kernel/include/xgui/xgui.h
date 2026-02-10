@@ -43,6 +43,13 @@ void xgui_quit(void);
 void xgui_shutdown(void);
 
 /*
+ * Change display resolution at runtime via Bochs VBE.
+ * Closes all windows, switches mode, reinitializes display/desktop.
+ * Returns 0 on success, -1 on failure.
+ */
+int xgui_set_resolution(int width, int height);
+
+/*
  * Check if XGUI is running
  */
 bool xgui_is_running(void);

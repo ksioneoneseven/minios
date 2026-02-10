@@ -11,8 +11,8 @@
 #include "types.h"
 
 /* Heap configuration */
-#define HEAP_INITIAL_SIZE   (16 * 1024 * 1024)  /* 16MB initial heap */
-#define HEAP_MAX_SIZE       (32 * 1024 * 1024)  /* 32MB max heap */
+#define HEAP_INITIAL_SIZE   (128 * 1024 * 1024) /* 128MB initial heap */
+#define HEAP_MAX_SIZE       (512 * 1024 * 1024) /* 512MB max heap */
 #define HEAP_MIN_BLOCK      32              /* Minimum block size */
 
 /* Heap block header */

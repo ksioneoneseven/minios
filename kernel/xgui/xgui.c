@@ -646,6 +646,44 @@ void xgui_shutdown(void) {
 }
 
 /*
+ * Change display resolution at runtime via Bochs VBE.
+ * Closes all windows, switches mode, reinitializes display/desktop.
+ */
+int xgui_set_resolution(int width, int height) {
+    serial_write_string("XGUI: set_resolution requested\n");
+
+    /* Switch the hardware mode */
+    if (vesa_set_mode(width, height, 32) < 0) {
+        serial_write_string("XGUI: vesa_set_mode failed\n");
+        return -1;
+    }
+
+    /* Reinitialize display backbuffer */
+    if (xgui_display_reinit() < 0) {
+        serial_write_string("XGUI: display_reinit failed\n");
+        return -1;
+    }
+
+    /* Close all open windows */
+    xgui_window_t* win = xgui_wm_get_top();
+    while (win) {
+        xgui_window_t* next = win->prev;
+        xgui_window_destroy(win);
+        win = next;
+    }
+
+    /* Update mouse bounds */
+    mouse_set_bounds(width, height);
+
+    /* Reinitialize desktop and panel for new dimensions */
+    xgui_desktop_init();
+    xgui_panel_init();
+
+    serial_write_string("XGUI: resolution changed OK\n");
+    return 0;
+}
+
+/*
  * Check if XGUI is running
  */
 bool xgui_is_running(void) {

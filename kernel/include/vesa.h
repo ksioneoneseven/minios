@@ -57,6 +57,17 @@ int vesa_get_height(void);
 int vesa_get_pitch(void);
 
 /*
+ * Check if Bochs VBE is available (QEMU -vga std)
+ */
+bool vesa_bochs_available(void);
+
+/*
+ * Set display resolution via Bochs VBE I/O ports (runtime mode switch).
+ * Only works with QEMU -vga std. Returns 0 on success, -1 on failure.
+ */
+int vesa_set_mode(int width, int height, int bpp);
+
+/*
  * Basic drawing operations (direct to framebuffer)
  */
 void vesa_set_pixel(int x, int y, uint32_t color);

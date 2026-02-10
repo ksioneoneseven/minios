@@ -19,13 +19,36 @@
 #include "timer.h"
 
 /* Explorer configuration */
-#define EXPLORER_WIDTH      420
-#define EXPLORER_HEIGHT     360
-#define MAX_VISIBLE_ITEMS   14
+#define EXPLORER_WIDTH      540
+#define EXPLORER_HEIGHT     400
+#define MAX_VISIBLE_ITEMS   16
 #define MAX_DIR_ENTRIES     64
 #define ITEM_HEIGHT         22
 #define PATH_BAR_HEIGHT     28
 #define TOOLBAR_HEIGHT      32
+#define SIDEBAR_WIDTH       130
+
+/* Sidebar items */
+typedef struct {
+    const char* label;
+    const char* path;
+    int is_header;      /* 1 = section header (not clickable) */
+} sidebar_item_t;
+
+static const sidebar_item_t sidebar_items[] = {
+    { "Favorites",    NULL,         1 },
+    { "Home",         "/",          0 },
+    { "Documents",    "/mnt",       0 },
+    { "Desktop",      "/tmp",       0 },
+    { "",             NULL,         1 },  /* spacer */
+    { "Locations",    NULL,         1 },
+    { "Root (/)",     "/",          0 },
+    { "/mnt",         "/mnt",       0 },
+    { "/dev",         "/dev",       0 },
+    { "/tmp",         "/tmp",       0 },
+};
+#define SIDEBAR_ITEM_COUNT (sizeof(sidebar_items) / sizeof(sidebar_items[0]))
+#define SIDEBAR_ITEM_H     20
 
 /* Directory entry for display */
 typedef struct {
@@ -413,6 +436,59 @@ static void draw_file_icon(xgui_window_t* win, int x, int y) {
 }
 
 /*
+ * Draw the sidebar pane
+ */
+static void draw_sidebar(xgui_window_t* win, int ch) {
+    int sb_top = TOOLBAR_HEIGHT;
+    int sb_h = ch - TOOLBAR_HEIGHT;
+
+    /* Sidebar background */
+    xgui_win_rect_filled(win, 0, sb_top, SIDEBAR_WIDTH, sb_h, XGUI_RGB(235, 235, 240));
+
+    /* Right border */
+    xgui_win_vline(win, SIDEBAR_WIDTH - 1, sb_top, sb_h, XGUI_RGB(200, 200, 200));
+
+    int y = sb_top + 8;
+    for (int i = 0; i < (int)SIDEBAR_ITEM_COUNT; i++) {
+        const sidebar_item_t* item = &sidebar_items[i];
+
+        if (item->is_header) {
+            if (item->label[0] == '\0') {
+                /* Spacer */
+                y += 8;
+                continue;
+            }
+            /* Section header */
+            xgui_win_text_transparent(win, 10, y + 2, item->label, XGUI_RGB(120, 120, 130));
+            y += SIDEBAR_ITEM_H;
+            continue;
+        }
+
+        /* Clickable item - highlight if it matches current path */
+        int active = (item->path && strcmp(item->path, current_path) == 0);
+        if (active) {
+            xgui_win_rect_filled(win, 4, y, SIDEBAR_WIDTH - 9, SIDEBAR_ITEM_H,
+                                 xgui_theme_current()->selection);
+            xgui_win_text_transparent(win, 24, y + 3, item->label, XGUI_WHITE);
+        } else {
+            xgui_win_text_transparent(win, 24, y + 3, item->label, XGUI_RGB(40, 40, 40));
+        }
+
+        /* Small icon for each item */
+        int ix = 8;
+        int iy = y + 4;
+        if (item->path) {
+            /* Folder dot */
+            uint32_t dot_color = active ? XGUI_RGB(255, 230, 140) : XGUI_RGB(180, 180, 190);
+            xgui_win_rect_filled(win, ix, iy, 10, 10, dot_color);
+            xgui_win_rect(win, ix, iy, 10, 10, active ? XGUI_RGB(255, 255, 200) : XGUI_RGB(160, 160, 170));
+        }
+
+        y += SIDEBAR_ITEM_H;
+    }
+}
+
+/*
  * Window paint callback
  * All coordinates are client-relative (0,0 = top-left of client area).
  * Draws into the window's own pixel buffer via xgui_win_* functions.
@@ -421,6 +497,10 @@ static void explorer_paint(xgui_window_t* win) {
     int cw = win->client_width;
     int ch = win->client_height;
     uint32_t accent = xgui_theme_current()->selection;
+
+    /* Right pane starts after sidebar */
+    int rx = SIDEBAR_WIDTH;
+    int rw = cw - SIDEBAR_WIDTH;
 
     /* --- Toolbar: subtle gradient background --- */
     for (int row = 0; row < TOOLBAR_HEIGHT; row++) {
@@ -435,27 +515,41 @@ static void explorer_paint(xgui_window_t* win) {
     /* Draw widgets (buttons) */
     xgui_widgets_draw(win);
 
+    /* --- Sidebar --- */
+    draw_sidebar(win, ch);
+
     /* --- Path bar: modern inset with subtle border --- */
     int path_y = TOOLBAR_HEIGHT;
     /* Path bar background */
-    xgui_win_rect_filled(win, 0, path_y, cw, PATH_BAR_HEIGHT, XGUI_RGB(240, 240, 240));
+    xgui_win_rect_filled(win, rx, path_y, rw, PATH_BAR_HEIGHT, XGUI_RGB(240, 240, 240));
     /* Path input field */
-    int pf_x = 6, pf_y = path_y + 4, pf_w = cw - 12, pf_h = PATH_BAR_HEIGHT - 8;
+    int pf_x = rx + 6, pf_y = path_y + 4, pf_w = rw - 12, pf_h = PATH_BAR_HEIGHT - 8;
     xgui_win_rect_filled(win, pf_x, pf_y, pf_w, pf_h, XGUI_WHITE);
     xgui_win_rect(win, pf_x, pf_y, pf_w, pf_h, XGUI_RGB(170, 170, 170));
     /* Inner highlight on bottom/right */
     xgui_win_hline(win, pf_x + 1, pf_y + pf_h - 1, pf_w - 2, XGUI_RGB(240, 240, 240));
-    /* Path text */
-    xgui_win_text(win, pf_x + 6, pf_y + 3, current_path, XGUI_RGB(40, 40, 40), XGUI_WHITE);
+    /* Path text - truncate if needed */
+    {
+        int max_path_chars = (pf_w - 12) / 8;
+        char display_path[64];
+        int plen = strlen(current_path);
+        if (plen <= max_path_chars) {
+            strncpy(display_path, current_path, sizeof(display_path) - 1);
+        } else {
+            strncpy(display_path, current_path + plen - max_path_chars, sizeof(display_path) - 1);
+        }
+        display_path[sizeof(display_path) - 1] = '\0';
+        xgui_win_text(win, pf_x + 6, pf_y + 3, display_path, XGUI_RGB(40, 40, 40), XGUI_WHITE);
+    }
     /* Bottom separator */
-    xgui_win_hline(win, 0, path_y + PATH_BAR_HEIGHT - 1, cw, XGUI_RGB(210, 210, 210));
+    xgui_win_hline(win, rx, path_y + PATH_BAR_HEIGHT - 1, rw, XGUI_RGB(210, 210, 210));
 
-    /* --- File list area --- */
+    /* --- File list area (right pane) --- */
     int list_y = path_y + PATH_BAR_HEIGHT;
     int list_h = ch - TOOLBAR_HEIGHT - PATH_BAR_HEIGHT - 22;
 
     /* List background */
-    xgui_win_rect_filled(win, 0, list_y, cw, list_h, XGUI_WHITE);
+    xgui_win_rect_filled(win, rx, list_y, rw, list_h, XGUI_WHITE);
 
     /* --- Column header: gradient --- */
     int header_y = list_y;
@@ -463,11 +557,11 @@ static void explorer_paint(xgui_window_t* win) {
     for (int row = 0; row < header_h; row++) {
         int t = (row * 40) / header_h;
         uint32_t c = XGUI_RGB(248 - t, 248 - t, 250 - t);
-        xgui_win_hline(win, 0, header_y + row, cw, c);
+        xgui_win_hline(win, rx, header_y + row, rw, c);
     }
-    xgui_win_hline(win, 0, header_y + header_h - 1, cw, XGUI_RGB(200, 200, 200));
+    xgui_win_hline(win, rx, header_y + header_h - 1, rw, XGUI_RGB(200, 200, 200));
     /* Header text */
-    xgui_win_text_transparent(win, 30, header_y + 4, "Name", XGUI_RGB(80, 80, 80));
+    xgui_win_text_transparent(win, rx + 24, header_y + 4, "Name", XGUI_RGB(80, 80, 80));
     xgui_win_text_transparent(win, cw - 80, header_y + 4, "Size", XGUI_RGB(80, 80, 80));
 
     /* --- Draw entries --- */
@@ -485,9 +579,9 @@ static void explorer_paint(xgui_window_t* win) {
 
         /* Row background: alternating or selected */
         uint32_t row_bg = (i % 2 == 0) ? row_even : row_odd;
-        bool selected = (idx == selected_index);
+        bool is_selected = (idx == selected_index);
 
-        if (selected) {
+        if (is_selected) {
             /* Selection highlight with subtle gradient */
             for (int row = 0; row < ITEM_HEIGHT; row++) {
                 int t = (row * 255) / ITEM_HEIGHT;
@@ -502,27 +596,26 @@ static void explorer_paint(xgui_window_t* win) {
                 if (b > 255) b = 255;
                 if (b < 0) b = 0;
                 (void)t;
-                xgui_win_hline(win, 0, y + row, cw - 16, XGUI_RGB(r, g, b));
+                xgui_win_hline(win, rx, y + row, rw - 16, XGUI_RGB(r, g, b));
             }
         } else {
-            xgui_win_rect_filled(win, 0, y, cw - 16, ITEM_HEIGHT, row_bg);
+            xgui_win_rect_filled(win, rx, y, rw - 16, ITEM_HEIGHT, row_bg);
         }
 
-        uint32_t text_color = selected ? XGUI_WHITE : XGUI_RGB(30, 30, 30);
+        uint32_t text_color = is_selected ? XGUI_WHITE : XGUI_RGB(30, 30, 30);
 
         /* Icon */
-        int icon_x = 8;
+        int icon_x = rx + 6;
         int icon_y = y + (ITEM_HEIGHT - 10) / 2;
         if (entry->is_dir) {
-            if (!selected) draw_folder_icon(win, icon_x, icon_y);
+            if (!is_selected) draw_folder_icon(win, icon_x, icon_y);
             else {
-                /* Bright folder on selection */
                 xgui_win_rect_filled(win, icon_x, icon_y, 5, 2, XGUI_RGB(255, 240, 160));
                 xgui_win_rect_filled(win, icon_x, icon_y + 2, 12, 8, XGUI_RGB(255, 240, 160));
                 xgui_win_rect(win, icon_x, icon_y + 2, 12, 8, XGUI_RGB(255, 255, 200));
             }
         } else {
-            if (!selected) draw_file_icon(win, icon_x + 1, icon_y);
+            if (!is_selected) draw_file_icon(win, icon_x + 1, icon_y);
             else {
                 xgui_win_rect_filled(win, icon_x + 1, icon_y, 10, 12, XGUI_RGB(255, 255, 255));
                 xgui_win_rect(win, icon_x + 1, icon_y, 10, 12, XGUI_RGB(200, 220, 255));
@@ -531,25 +624,28 @@ static void explorer_paint(xgui_window_t* win) {
 
         /* Name */
         char name_buf[40];
-        strncpy(name_buf, entry->name, 35);
-        name_buf[35] = '\0';
-        if (strlen(entry->name) > 35) strcat(name_buf, "...");
-        xgui_win_text_transparent(win, 26, y + 4, name_buf, text_color);
+        int max_name = (rw - 120) / 8;
+        if (max_name > 35) max_name = 35;
+        if (max_name < 8) max_name = 8;
+        strncpy(name_buf, entry->name, max_name);
+        name_buf[max_name] = '\0';
+        if ((int)strlen(entry->name) > max_name) strcat(name_buf, "...");
+        xgui_win_text_transparent(win, rx + 24, y + 4, name_buf, text_color);
 
         /* Size */
         if (!entry->is_dir) {
             char size_buf[16];
             format_size(entry->size, size_buf, sizeof(size_buf));
             xgui_win_text_transparent(win, cw - 80, y + 4, size_buf,
-                                      selected ? XGUI_RGB(220, 230, 255) : XGUI_RGB(100, 100, 100));
+                                      is_selected ? XGUI_RGB(220, 230, 255) : XGUI_RGB(100, 100, 100));
         } else {
             xgui_win_text_transparent(win, cw - 80, y + 4, "<DIR>",
-                                      selected ? XGUI_RGB(220, 230, 255) : XGUI_RGB(140, 140, 140));
+                                      is_selected ? XGUI_RGB(220, 230, 255) : XGUI_RGB(140, 140, 140));
         }
 
         /* Subtle bottom border per row */
-        if (!selected) {
-            xgui_win_hline(win, 0, y + ITEM_HEIGHT - 1, cw - 16, XGUI_RGB(235, 235, 235));
+        if (!is_selected) {
+            xgui_win_hline(win, rx, y + ITEM_HEIGHT - 1, rw - 16, XGUI_RGB(235, 235, 235));
         }
     }
 
@@ -557,10 +653,9 @@ static void explorer_paint(xgui_window_t* win) {
     int sb_x = cw - 14;
     int sb_full_y = item_y;
     int sb_full_h = visible_items * ITEM_HEIGHT;
-    int sb_btn_h = 14;  /* Arrow button height */
+    int sb_btn_h = 14;
 
     if (entry_count > visible_items && visible_items > 0) {
-        /* Full scrollbar background */
         xgui_win_rect_filled(win, sb_x, sb_full_y, 14, sb_full_h, XGUI_RGB(240, 240, 240));
         xgui_win_vline(win, sb_x, sb_full_y, sb_full_h, XGUI_RGB(210, 210, 210));
 
@@ -568,7 +663,6 @@ static void explorer_paint(xgui_window_t* win) {
         xgui_win_rect_filled(win, sb_x, sb_full_y, 14, sb_btn_h, XGUI_RGB(225, 225, 228));
         xgui_win_rect(win, sb_x, sb_full_y, 14, sb_btn_h, XGUI_RGB(190, 190, 190));
         xgui_win_hline(win, sb_x + 1, sb_full_y + 1, 12, XGUI_RGB(245, 245, 248));
-        /* Up triangle */
         for (int r = 0; r < 4; r++) {
             xgui_win_hline(win, sb_x + 7 - r, sb_full_y + 4 + r, r * 2 + 1, XGUI_RGB(80, 80, 80));
         }
@@ -578,16 +672,14 @@ static void explorer_paint(xgui_window_t* win) {
         xgui_win_rect_filled(win, sb_x, dn_y, 14, sb_btn_h, XGUI_RGB(225, 225, 228));
         xgui_win_rect(win, sb_x, dn_y, 14, sb_btn_h, XGUI_RGB(190, 190, 190));
         xgui_win_hline(win, sb_x + 1, dn_y + 1, 12, XGUI_RGB(245, 245, 248));
-        /* Down triangle */
         for (int r = 0; r < 4; r++) {
             xgui_win_hline(win, sb_x + 7 - r, dn_y + 9 - r, r * 2 + 1, XGUI_RGB(80, 80, 80));
         }
 
-        /* Track area (between buttons) */
+        /* Track area */
         int track_y = sb_full_y + sb_btn_h;
         int track_h = sb_full_h - sb_btn_h * 2;
 
-        /* Thumb */
         if (track_h > 4) {
             int thumb_h = (visible_items * track_h) / entry_count;
             if (thumb_h < 16) thumb_h = 16;
@@ -599,7 +691,6 @@ static void explorer_paint(xgui_window_t* win) {
             xgui_win_rect_filled(win, sb_x + 1, thumb_y, 12, thumb_h, XGUI_RGB(180, 180, 185));
             xgui_win_hline(win, sb_x + 2, thumb_y, 10, XGUI_RGB(210, 210, 215));
             xgui_win_hline(win, sb_x + 2, thumb_y + thumb_h - 1, 10, XGUI_RGB(155, 155, 160));
-            /* Grip lines */
             int grip_y = thumb_y + thumb_h / 2 - 3;
             for (int g = 0; g < 3; g++) {
                 xgui_win_hline(win, sb_x + 4, grip_y + g * 3, 6, XGUI_RGB(155, 155, 160));
@@ -610,7 +701,6 @@ static void explorer_paint(xgui_window_t* win) {
 
     /* --- Status bar --- */
     int status_y = ch - 22;
-    /* Gradient status bar */
     for (int row = 0; row < 22; row++) {
         int t = (row * 20) / 22;
         xgui_win_hline(win, 0, status_y + row, cw, XGUI_RGB(240 - t, 240 - t, 242 - t));
@@ -619,23 +709,20 @@ static void explorer_paint(xgui_window_t* win) {
 
     char status[80];
     snprintf(status, sizeof(status), " %d items", entry_count);
-    xgui_win_text_transparent(win, 6, status_y + 5, status, XGUI_RGB(80, 80, 80));
+    xgui_win_text_transparent(win, rx + 6, status_y + 5, status, XGUI_RGB(80, 80, 80));
 
     /* Context menu (drawn last, on top of everything) */
     if (ctx_menu_visible && ctx_menu_index >= 0 && ctx_menu_index < entry_count) {
-        int mx = ctx_menu_x;
-        int my = ctx_menu_y;
+        int cmx = ctx_menu_x;
+        int cmy = ctx_menu_y;
 
-        /* Clamp to window bounds */
-        if (mx + CTX_MENU_W > cw) mx = cw - CTX_MENU_W;
-        if (my + CTX_MENU_H > ch) my = ch - CTX_MENU_H;
+        if (cmx + CTX_MENU_W > cw) cmx = cw - CTX_MENU_W;
+        if (cmy + CTX_MENU_H > ch) cmy = ch - CTX_MENU_H;
 
-        /* Menu background with shadow */
-        xgui_win_rect_filled(win, mx + 2, my + 2, CTX_MENU_W, CTX_MENU_H, XGUI_RGB(80, 80, 80));
-        xgui_win_rect_filled(win, mx, my, CTX_MENU_W, CTX_MENU_H, XGUI_RGB(240, 240, 240));
-        xgui_win_rect(win, mx, my, CTX_MENU_W, CTX_MENU_H, XGUI_DARK_GRAY);
+        xgui_win_rect_filled(win, cmx + 2, cmy + 2, CTX_MENU_W, CTX_MENU_H, XGUI_RGB(80, 80, 80));
+        xgui_win_rect_filled(win, cmx, cmy, CTX_MENU_W, CTX_MENU_H, XGUI_RGB(240, 240, 240));
+        xgui_win_rect(win, cmx, cmy, CTX_MENU_W, CTX_MENU_H, XGUI_DARK_GRAY);
 
-        /* Menu items */
         const char* labels[CTX_MENU_ITEMS] = {
             "Open with Text Editor",
             "Open with Spreadsheet",
@@ -645,24 +732,22 @@ static void explorer_paint(xgui_window_t* win) {
             "Paste",
             "Add Shortcut to Desktop"
         };
-        int sep_extra = 0;  /* extra Y offset after separators */
+        int sep_extra = 0;
         for (int i = 0; i < CTX_MENU_ITEMS; i++) {
             if (i == CTX_MENU_SEP1 || i == CTX_MENU_SEP2) {
-                /* Draw separator line */
-                int sy = my + 2 + i * CTX_MENU_ITEM_H + sep_extra;
-                xgui_win_hline(win, mx + 4, sy, CTX_MENU_W - 8, XGUI_DARK_GRAY);
+                int sy = cmy + 2 + i * CTX_MENU_ITEM_H + sep_extra;
+                xgui_win_hline(win, cmx + 4, sy, CTX_MENU_W - 8, XGUI_DARK_GRAY);
                 sep_extra += 4;
             }
-            int iy = my + 2 + i * CTX_MENU_ITEM_H + sep_extra;
-            /* Gray out Paste if clipboard is empty */
+            int iy = cmy + 2 + i * CTX_MENU_ITEM_H + sep_extra;
             int grayed = (i == 5 && !clipboard_valid);
             if (i == ctx_menu_hover && !grayed) {
-                xgui_win_rect_filled(win, mx + 1, iy, CTX_MENU_W - 2, CTX_MENU_ITEM_H,
+                xgui_win_rect_filled(win, cmx + 1, iy, CTX_MENU_W - 2, CTX_MENU_ITEM_H,
                                      XGUI_SELECTION);
-                xgui_win_text(win, mx + 8, iy + 3, labels[i], XGUI_WHITE, XGUI_SELECTION);
+                xgui_win_text(win, cmx + 8, iy + 3, labels[i], XGUI_WHITE, XGUI_SELECTION);
             } else {
                 uint32_t fg = grayed ? XGUI_GRAY : XGUI_BLACK;
-                xgui_win_text(win, mx + 8, iy + 3, labels[i], fg,
+                xgui_win_text(win, cmx + 8, iy + 3, labels[i], fg,
                               XGUI_RGB(240, 240, 240));
             }
         }
@@ -818,6 +903,25 @@ static void explorer_handler(xgui_window_t* win, xgui_event_t* event) {
             return;
         }
 
+        /* Sidebar clicks */
+        if (event->mouse.button == XGUI_MOUSE_LEFT && mx < SIDEBAR_WIDTH && my >= TOOLBAR_HEIGHT) {
+            int sy = TOOLBAR_HEIGHT + 8;
+            for (int i = 0; i < (int)SIDEBAR_ITEM_COUNT; i++) {
+                const sidebar_item_t* si = &sidebar_items[i];
+                if (si->is_header) {
+                    if (si->label[0] == '\0') { sy += 8; continue; }
+                    sy += SIDEBAR_ITEM_H;
+                    continue;
+                }
+                if (my >= sy && my < sy + SIDEBAR_ITEM_H && si->path) {
+                    load_directory(si->path);
+                    return;
+                }
+                sy += SIDEBAR_ITEM_H;
+            }
+            return;
+        }
+
         /* Scrollbar arrow button clicks */
         if (event->mouse.button == XGUI_MOUSE_LEFT) {
             int sb_x = win->client_width - 14;
@@ -845,7 +949,7 @@ static void explorer_handler(xgui_window_t* win, xgui_event_t* event) {
 
         /* Right-click on a file or directory: show context menu */
         if (event->mouse.button == XGUI_MOUSE_RIGHT) {
-            if (mx >= 6 && mx < win->client_width - 20 &&
+            if (mx >= SIDEBAR_WIDTH + 6 && mx < win->client_width - 20 &&
                 my >= list_y && my < list_y + visible_items * ITEM_HEIGHT) {
                 int clicked_item = (my - list_y) / ITEM_HEIGHT + scroll_offset;
                 if (clicked_item >= 0 && clicked_item < entry_count) {
@@ -861,8 +965,8 @@ static void explorer_handler(xgui_window_t* win, xgui_event_t* event) {
             return;
         }
 
-        /* Left-click: check if click is in list area */
-        if (mx >= 6 && mx < win->client_width - 20 &&
+        /* Left-click: check if click is in file list area (right pane) */
+        if (mx >= SIDEBAR_WIDTH + 6 && mx < win->client_width - 20 &&
             my >= list_y && my < list_y + visible_items * ITEM_HEIGHT) {
             int clicked_item = (my - list_y) / ITEM_HEIGHT + scroll_offset;
             if (clicked_item >= 0 && clicked_item < entry_count) {

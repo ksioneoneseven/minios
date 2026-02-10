@@ -10,6 +10,31 @@
 #include "../include/stdio.h"
 #include "../include/string.h"
 #include "../include/serial.h"
+#include "../include/io.h"
+
+/* Bochs VBE Display Interface (works with QEMU -vga std) */
+#define VBE_DISPI_IOPORT_INDEX  0x01CE
+#define VBE_DISPI_IOPORT_DATA   0x01CF
+
+#define VBE_DISPI_INDEX_ID      0x0
+#define VBE_DISPI_INDEX_XRES    0x1
+#define VBE_DISPI_INDEX_YRES    0x2
+#define VBE_DISPI_INDEX_BPP     0x3
+#define VBE_DISPI_INDEX_ENABLE  0x4
+
+#define VBE_DISPI_DISABLED      0x00
+#define VBE_DISPI_ENABLED       0x01
+#define VBE_DISPI_LFB_ENABLED   0x40
+
+static void bga_write(uint16_t reg, uint16_t val) {
+    outw(VBE_DISPI_IOPORT_INDEX, reg);
+    outw(VBE_DISPI_IOPORT_DATA, val);
+}
+
+static uint16_t bga_read(uint16_t reg) {
+    outw(VBE_DISPI_IOPORT_INDEX, reg);
+    return inw(VBE_DISPI_IOPORT_DATA);
+}
 
 /* Global framebuffer state */
 static vesa_info_t vesa_info = {
@@ -421,4 +446,74 @@ void vesa_copy_rect(int dst_x, int dst_y, int src_x, int src_y, int w, int h) {
             memmove(dst, src, row_bytes);
         }
     }
+}
+
+/*
+ * Check if Bochs VBE is available (QEMU -vga std)
+ */
+bool vesa_bochs_available(void) {
+    uint16_t id = bga_read(VBE_DISPI_INDEX_ID);
+    return (id >= 0xB0C0 && id <= 0xB0CF);
+}
+
+/*
+ * Set display resolution via Bochs VBE I/O ports.
+ * Works from protected mode — no BIOS calls needed.
+ * Only works with QEMU -vga std (Bochs VBE adapter).
+ * Returns 0 on success, -1 on failure.
+ */
+int vesa_set_mode(int width, int height, int bpp) {
+    if (!vesa_info.available) return -1;
+    if (!vesa_bochs_available()) {
+        serial_write_string("VESA: Bochs VBE not detected, cannot switch mode\n");
+        return -1;
+    }
+
+    serial_write_string("VESA: set_mode ");
+    serial_write_hex((uint32_t)width);
+    serial_write_string("x");
+    serial_write_hex((uint32_t)height);
+    serial_write_string("x");
+    serial_write_hex((uint32_t)bpp);
+    serial_write_string("\n");
+
+    /* Disable VBE */
+    bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+
+    /* Set new resolution */
+    bga_write(VBE_DISPI_INDEX_XRES, (uint16_t)width);
+    bga_write(VBE_DISPI_INDEX_YRES, (uint16_t)height);
+    bga_write(VBE_DISPI_INDEX_BPP, (uint16_t)bpp);
+
+    /* Enable VBE with linear framebuffer */
+    bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+
+    /* Map any additional framebuffer pages needed for the new size */
+    uint32_t new_pitch = (uint32_t)width * (uint32_t)(bpp / 8);
+    uint32_t new_size = new_pitch * (uint32_t)height;
+    uint32_t fb_phys = (uint32_t)vesa_info.framebuffer;
+
+    if (new_size > vesa_info.size) {
+        for (uint32_t offset = vesa_info.size; offset < new_size; offset += 4096) {
+            paging_map_page(fb_phys + offset, fb_phys + offset,
+                           PAGE_KERNEL | PAGE_NOCACHE);
+        }
+    }
+
+    /* Update internal state */
+    vesa_info.width = (uint32_t)width;
+    vesa_info.height = (uint32_t)height;
+    vesa_info.bpp = (uint32_t)bpp;
+    vesa_info.bytes_per_pixel = (uint8_t)(bpp / 8);
+    vesa_info.pitch = new_pitch;
+    vesa_info.size = new_size;
+    /* Color positions stay the same (standard BGR for 32bpp) */
+
+    serial_write_string("VESA: mode set OK, pitch=");
+    serial_write_hex(new_pitch);
+    serial_write_string(" size=");
+    serial_write_hex(new_size);
+    serial_write_string("\n");
+
+    return 0;
 }

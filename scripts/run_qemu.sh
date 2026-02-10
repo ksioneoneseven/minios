@@ -15,7 +15,7 @@ fi
 
 # Common QEMU options
 QEMU_OPTS="-cdrom $ISO_PATH"
-QEMU_OPTS="$QEMU_OPTS -m 128M"
+QEMU_OPTS="$QEMU_OPTS -m 768M"
 QEMU_OPTS="$QEMU_OPTS -serial stdio"
 QEMU_OPTS="$QEMU_OPTS -vga std"
 

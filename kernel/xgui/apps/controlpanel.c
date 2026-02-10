@@ -14,6 +14,8 @@
 #include "string.h"
 #include "stdio.h"
 #include "keyboard.h"
+#include "conf.h"
+#include "vesa.h"
 
 /* Singleton window */
 static xgui_window_t* cp_window = NULL;
@@ -21,12 +23,33 @@ static xgui_window_t* cp_window = NULL;
 /* Tab system */
 #define CP_TAB_APPEARANCE  0
 #define CP_TAB_FONT        1
-#define CP_TAB_COUNT       2
+#define CP_TAB_DISPLAY     2
+#define CP_TAB_COUNT       3
 static int cp_active_tab = CP_TAB_APPEARANCE;
-static const char* cp_tab_names[CP_TAB_COUNT] = { "Appearance", "Font" };
+static const char* cp_tab_names[CP_TAB_COUNT] = { "Appearance", "Font", "Display" };
+
+/* Display tab: resolution options */
+typedef struct {
+    int width;
+    int height;
+    const char* label;
+} res_option_t;
+
+static const res_option_t res_options[] = {
+    { 800,  600,  "800 x 600" },
+    { 1024, 768,  "1024 x 768" },
+    { 1280, 1024, "1280 x 1024" },
+};
+#define RES_OPTION_COUNT 3
+
+static xgui_widget_t* res_buttons[RES_OPTION_COUNT];
+
+/* Reboot prompt state */
+static bool reboot_prompt_visible = false;
+static int reboot_prompt_selection = -1;  /* -1=none, 0=selected res index */
 
 #define TAB_BAR_H     24
-#define TAB_BTN_W     100
+#define TAB_BTN_W     75
 #define TAB_BTN_H     22
 #define CONTENT_Y     (TAB_BAR_H + 4)
 
@@ -169,6 +192,28 @@ static void font_button_click(xgui_widget_t* widget) {
 }
 
 /*
+ * Resolution button click callback — switch resolution at runtime
+ */
+static void res_button_click(xgui_widget_t* widget) {
+    int idx = (int)(uint32_t)xgui_widget_get_userdata(widget);
+    /* Check if this is already the current resolution */
+    int cur_w = xgui_display_width();
+    int cur_h = xgui_display_height();
+    if (res_options[idx].width == cur_w && res_options[idx].height == cur_h) {
+        return;  /* Already at this resolution */
+    }
+    /* Switch resolution at runtime — this destroys all windows including ours */
+    cp_window = NULL;
+    wp_set_btn = NULL;
+    wp_clear_btn = NULL;
+    for (int i = 0; i < (int)WP_MODE_COUNT; i++) wp_mode_btns[i] = NULL;
+    for (int i = 0; i < (int)XGUI_THEME_COUNT; i++) theme_buttons[i] = NULL;
+    for (int i = 0; i < XGUI_FONT_COUNT; i++) font_buttons[i] = NULL;
+    for (int i = 0; i < RES_OPTION_COUNT; i++) res_buttons[i] = NULL;
+    xgui_set_resolution(res_options[idx].width, res_options[idx].height);
+}
+
+/*
  * Destroy all widgets for the current tab
  */
 static void cp_destroy_tab_widgets(void) {
@@ -179,6 +224,9 @@ static void cp_destroy_tab_widgets(void) {
     for (int i = 0; i < (int)WP_MODE_COUNT; i++) wp_mode_btns[i] = NULL;
     for (int i = 0; i < (int)XGUI_THEME_COUNT; i++) theme_buttons[i] = NULL;
     for (int i = 0; i < XGUI_FONT_COUNT; i++) font_buttons[i] = NULL;
+    for (int i = 0; i < RES_OPTION_COUNT; i++) res_buttons[i] = NULL;
+    reboot_prompt_visible = false;
+    reboot_prompt_selection = -1;
 }
 
 /*
@@ -229,6 +277,17 @@ static void cp_create_tab_widgets(void) {
             if (font_buttons[i]) {
                 xgui_widget_set_onclick(font_buttons[i], font_button_click);
                 xgui_widget_set_userdata(font_buttons[i], (void*)(uint32_t)i);
+            }
+        }
+    } else if (cp_active_tab == CP_TAB_DISPLAY) {
+        /* Resolution buttons */
+        for (int i = 0; i < RES_OPTION_COUNT; i++) {
+            int by = CONTENT_Y + 80 + i * 34;
+            res_buttons[i] = xgui_button_create(cp_window, 15, by, 140, 28,
+                                                 res_options[i].label);
+            if (res_buttons[i]) {
+                xgui_widget_set_onclick(res_buttons[i], res_button_click);
+                xgui_widget_set_userdata(res_buttons[i], (void*)(uint32_t)i);
             }
         }
     }
@@ -415,6 +474,63 @@ static void cp_paint_font(xgui_window_t* win) {
 }
 
 /*
+ * Paint: Display tab
+ */
+static void cp_paint_display(xgui_window_t* win) {
+    int cw = win->buf_width;
+
+    /* Current resolution info */
+    xgui_win_text_transparent(win, 10, CONTENT_Y + 8, "Current Resolution", XGUI_BLACK);
+
+    int cur_w = xgui_display_width();
+    int cur_h = xgui_display_height();
+    char res_str[32];
+    snprintf(res_str, sizeof(res_str), "%d x %d", cur_w, cur_h);
+
+    xgui_win_rect_filled(win, 10, CONTENT_Y + 26, cw - 20, 24, XGUI_RGB(240, 240, 240));
+    xgui_win_rect(win, 10, CONTENT_Y + 26, cw - 20, 24, XGUI_DARK_GRAY);
+    xgui_win_text(win, 16, CONTENT_Y + 30, res_str, XGUI_BLACK, XGUI_RGB(240, 240, 240));
+
+    /* BPP info */
+    vesa_info_t* vesa = vesa_get_info();
+    char bpp_str[32];
+    snprintf(bpp_str, sizeof(bpp_str), "%d bpp", vesa->bpp);
+    int bpp_x = cw - 10 - (int)strlen(bpp_str) * 8;
+    xgui_win_text(win, bpp_x, CONTENT_Y + 30, bpp_str, XGUI_RGB(100, 100, 100),
+                  XGUI_RGB(240, 240, 240));
+
+    /* Separator */
+    xgui_win_hline(win, 10, CONTENT_Y + 60, cw - 20, XGUI_DARK_GRAY);
+
+    /* Resolution picker label */
+    xgui_win_text_transparent(win, 10, CONTENT_Y + 66, "Change Resolution", XGUI_BLACK);
+
+    /* Highlight current resolution button */
+    for (int i = 0; i < RES_OPTION_COUNT; i++) {
+        if (res_buttons[i]) {
+            int bx = res_buttons[i]->x;
+            int by = res_buttons[i]->y;
+            if (res_options[i].width == cur_w && res_options[i].height == cur_h) {
+                xgui_win_rect_filled(win, bx - 8, by + 8, 5, 12, XGUI_RGB(0, 160, 0));
+            }
+        }
+    }
+
+    /* Note */
+    int note_y = CONTENT_Y + 80 + RES_OPTION_COUNT * 34 + 8;
+    xgui_win_text_transparent(win, 10, note_y, "Changes apply instantly.",
+                              XGUI_RGB(120, 120, 120));
+    xgui_win_text_transparent(win, 10, note_y + 16, "All windows will close.",
+                              XGUI_RGB(120, 120, 120));
+    if (!vesa_bochs_available()) {
+        xgui_win_text_transparent(win, 10, note_y + 36, "Bochs VBE not detected.",
+                                  XGUI_RGB(180, 60, 60));
+        xgui_win_text_transparent(win, 10, note_y + 52, "Use QEMU -vga std.",
+                                  XGUI_RGB(180, 60, 60));
+    }
+}
+
+/*
  * Main paint callback
  */
 static void cp_paint(xgui_window_t* win) {
@@ -424,6 +540,8 @@ static void cp_paint(xgui_window_t* win) {
         cp_paint_appearance(win);
     } else if (cp_active_tab == CP_TAB_FONT) {
         cp_paint_font(win);
+    } else if (cp_active_tab == CP_TAB_DISPLAY) {
+        cp_paint_display(win);
     }
 
     xgui_widgets_draw(win);

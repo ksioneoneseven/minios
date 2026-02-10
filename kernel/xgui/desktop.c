@@ -38,6 +38,9 @@ static int panel_y = 0;
 /* Start menu state */
 static bool start_menu_open = false;
 
+/* Task button scroll state */
+static int panel_task_scroll = 0;  /* index of first visible task */
+
 /* ------------------------------------------------------------------ */
 /*  Desktop Icons                                                      */
 /* ------------------------------------------------------------------ */
@@ -912,7 +915,8 @@ static void draw_clock(void) {
 
     int time_w = 72;
     int date_w = 88;
-    int total_w = date_w + time_w;
+    int clock_gap = 10;
+    int total_w = date_w + clock_gap + time_w;
     int date_x = screen_width - total_w;
     int time_x = screen_width - time_w + 4;
     int text_y = panel_y + (XGUI_PANEL_HEIGHT - 16) / 2;
@@ -925,7 +929,7 @@ static void draw_clock(void) {
     xgui_display_vline(date_x - 2, panel_y + 6, XGUI_PANEL_HEIGHT - 12, sep_col);
 
     /* Thin separator between date and time */
-    xgui_display_vline(date_x + date_w, panel_y + 8, XGUI_PANEL_HEIGHT - 16, sep_col);
+    xgui_display_vline(date_x + date_w + clock_gap / 2, panel_y + 8, XGUI_PANEL_HEIGHT - 16, sep_col);
 
     xgui_display_text_transparent(date_x + 4, text_y, date_str, text_col);
     xgui_display_text_transparent(time_x, text_y, time_str, text_col);
@@ -961,28 +965,91 @@ void xgui_panel_draw(void) {
     /* Draw start button */
     draw_start_button(start_menu_open);
     
-    /* Draw task buttons for each window */
-    int task_x = 68;
+    /* Build flat list of all taskbar windows (non-minimized first, then minimized) */
+    #define PANEL_MAX_WINDOWS 32
+    #define PANEL_NAV_W       18  /* width of each < > nav arrow button */
+    xgui_window_t* panel_wins[PANEL_MAX_WINDOWS];
+    int total_tasks = 0;
+
+    for (xgui_window_t* win = xgui_wm_get_top(); win && total_tasks < PANEL_MAX_WINDOWS; win = win->prev) {
+        if ((win->flags & XGUI_WINDOW_VISIBLE) && !(win->flags & XGUI_WINDOW_MINIMIZED)) {
+            panel_wins[total_tasks++] = win;
+        }
+    }
+    for (xgui_window_t* win = xgui_wm_get_top(); win && total_tasks < PANEL_MAX_WINDOWS; win = win->prev) {
+        if ((win->flags & XGUI_WINDOW_MINIMIZED) && (win->flags & XGUI_WINDOW_VISIBLE)) {
+            panel_wins[total_tasks++] = win;
+        }
+    }
+
     int task_y = panel_y + 4;
     int task_h = XGUI_PANEL_HEIGHT - 8;
     int task_w = XGUI_PANEL_BUTTON_WIDTH;
-    int max_tasks = (screen_width - 120 - 60) / (task_w + 2);
-    
-    int task_count = 0;
-    /* Non-minimized visible windows */
-    for (xgui_window_t* win = xgui_wm_get_top(); win && task_count < max_tasks; win = win->prev) {
-        if ((win->flags & XGUI_WINDOW_VISIBLE) && !(win->flags & XGUI_WINDOW_MINIMIZED)) {
-            draw_task_button(win, task_x, task_y, task_w, task_h);
-            task_x += task_w + 2;
-            task_count++;
+
+    /* Calculate available space for task buttons */
+    int clock_reserved = 180;  /* space for clock/date area */
+    int task_area_left = 68;
+    int task_area_right = screen_width - clock_reserved;
+    int task_area_w = task_area_right - task_area_left;
+
+    int max_visible = task_area_w / (task_w + 2);
+    if (max_visible < 1) max_visible = 1;
+    bool need_nav = (total_tasks > max_visible);
+
+    /* If we need nav arrows, shrink visible area to make room for them */
+    if (need_nav) {
+        task_area_left += PANEL_NAV_W + 2;
+        task_area_w = task_area_right - task_area_left;
+        max_visible = task_area_w / (task_w + 2);
+        if (max_visible < 1) max_visible = 1;
+    }
+
+    /* Clamp scroll offset */
+    if (panel_task_scroll > total_tasks - max_visible)
+        panel_task_scroll = total_tasks - max_visible;
+    if (panel_task_scroll < 0)
+        panel_task_scroll = 0;
+
+    /* Draw nav left arrow if needed */
+    if (need_nav) {
+        int nav_x = 68;
+        int nav_y = task_y;
+        uint32_t nav_bg = lighten(panel_bg, is_dark_color(panel_bg) ? 20 : -10);
+        uint32_t nav_fg = panel_text_color();
+        bool can_left = (panel_task_scroll > 0);
+        if (!can_left) nav_fg = blend_color(nav_fg, panel_bg, 150);
+        draw_gradient_button(nav_x, nav_y, PANEL_NAV_W, task_h, nav_bg, false);
+        /* Left triangle */
+        for (int r = 0; r < 4; r++) {
+            xgui_display_hline(nav_x + 9 - r, nav_y + task_h / 2 - 3 + r, 1 + r, nav_fg);
+        }
+        for (int r = 0; r < 3; r++) {
+            xgui_display_hline(nav_x + 7 + r, nav_y + task_h / 2 + 1 + r, 1 + (3 - r), nav_fg);
         }
     }
-    /* Minimized windows (shown with raised/unfocused style) */
-    for (xgui_window_t* win = xgui_wm_get_top(); win && task_count < max_tasks; win = win->prev) {
-        if ((win->flags & XGUI_WINDOW_MINIMIZED) && (win->flags & XGUI_WINDOW_VISIBLE)) {
-            draw_task_button(win, task_x, task_y, task_w, task_h);
-            task_x += task_w + 2;
-            task_count++;
+
+    /* Draw visible task buttons */
+    int task_x = task_area_left;
+    for (int i = 0; i < max_visible && (i + panel_task_scroll) < total_tasks; i++) {
+        draw_task_button(panel_wins[i + panel_task_scroll], task_x, task_y, task_w, task_h);
+        task_x += task_w + 2;
+    }
+
+    /* Draw nav right arrow if needed */
+    if (need_nav) {
+        int nav_x = task_x + 2;
+        int nav_y = task_y;
+        uint32_t nav_bg = lighten(panel_bg, is_dark_color(panel_bg) ? 20 : -10);
+        uint32_t nav_fg = panel_text_color();
+        bool can_right = (panel_task_scroll + max_visible < total_tasks);
+        if (!can_right) nav_fg = blend_color(nav_fg, panel_bg, 150);
+        draw_gradient_button(nav_x, nav_y, PANEL_NAV_W, task_h, nav_bg, false);
+        /* Right triangle */
+        for (int r = 0; r < 4; r++) {
+            xgui_display_hline(nav_x + 6 + r, nav_y + task_h / 2 - 3 + r, 4 - r, nav_fg);
+        }
+        for (int r = 0; r < 3; r++) {
+            xgui_display_hline(nav_x + 8 - r, nav_y + task_h / 2 + 1 + r, 1 + r, nav_fg);
         }
     }
     
@@ -1501,7 +1568,8 @@ bool xgui_panel_click(int x, int y, int button) {
     {
         int time_w = 72;
         int date_w = 88;
-        int total_w = date_w + time_w;
+        int clock_gap2 = 10;
+        int total_w = date_w + clock_gap2 + time_w;
         int date_x = screen_width - total_w;
         int time_x = screen_width - time_w;
 
@@ -1517,37 +1585,73 @@ bool xgui_panel_click(int x, int y, int button) {
         }
     }
 
-    /* Check task buttons */
-    int task_x = 68;
-    int task_w = XGUI_PANEL_BUTTON_WIDTH;
-    int max_tasks = (screen_width - 120 - 60) / (task_w + 2);
-    
-    int task_count = 0;
-    /* Non-minimized windows first */
-    for (xgui_window_t* win = xgui_wm_get_top(); win && task_count < max_tasks; win = win->prev) {
-        if ((win->flags & XGUI_WINDOW_VISIBLE) && !(win->flags & XGUI_WINDOW_MINIMIZED)) {
-            if (x >= task_x && x < task_x + task_w) {
-                if (win->flags & XGUI_WINDOW_FOCUSED) {
-                    /* Clicking focused window minimizes it */
+    /* Build task list (same order as draw) */
+    {
+        xgui_window_t* click_wins[PANEL_MAX_WINDOWS];
+        int click_total = 0;
+
+        for (xgui_window_t* win = xgui_wm_get_top(); win && click_total < PANEL_MAX_WINDOWS; win = win->prev) {
+            if ((win->flags & XGUI_WINDOW_VISIBLE) && !(win->flags & XGUI_WINDOW_MINIMIZED)) {
+                click_wins[click_total++] = win;
+            }
+        }
+        for (xgui_window_t* win = xgui_wm_get_top(); win && click_total < PANEL_MAX_WINDOWS; win = win->prev) {
+            if ((win->flags & XGUI_WINDOW_MINIMIZED) && (win->flags & XGUI_WINDOW_VISIBLE)) {
+                click_wins[click_total++] = win;
+            }
+        }
+
+        int task_w2 = XGUI_PANEL_BUTTON_WIDTH;
+        int clock_res = 180;
+        int area_left = 68;
+        int area_right = screen_width - clock_res;
+        int area_w = area_right - area_left;
+        int max_vis = area_w / (task_w2 + 2);
+        if (max_vis < 1) max_vis = 1;
+        bool has_nav = (click_total > max_vis);
+
+        if (has_nav) {
+            /* Check left nav arrow click */
+            if (x >= 68 && x < 68 + PANEL_NAV_W) {
+                if (panel_task_scroll > 0) panel_task_scroll--;
+                return true;
+            }
+            area_left += PANEL_NAV_W + 2;
+            area_w = area_right - area_left;
+            max_vis = area_w / (task_w2 + 2);
+            if (max_vis < 1) max_vis = 1;
+        }
+
+        /* Clamp scroll */
+        if (panel_task_scroll > click_total - max_vis)
+            panel_task_scroll = click_total - max_vis;
+        if (panel_task_scroll < 0)
+            panel_task_scroll = 0;
+
+        /* Check each visible task button */
+        int bx = area_left;
+        for (int i = 0; i < max_vis && (i + panel_task_scroll) < click_total; i++) {
+            if (x >= bx && x < bx + task_w2) {
+                xgui_window_t* win = click_wins[i + panel_task_scroll];
+                if (win->flags & XGUI_WINDOW_MINIMIZED) {
+                    xgui_window_restore(win);
+                } else if (win->flags & XGUI_WINDOW_FOCUSED) {
                     xgui_window_minimize(win);
                 } else {
                     xgui_window_focus(win);
                 }
                 return true;
             }
-            task_x += task_w + 2;
-            task_count++;
+            bx += task_w2 + 2;
         }
-    }
-    /* Minimized windows */
-    for (xgui_window_t* win = xgui_wm_get_top(); win && task_count < max_tasks; win = win->prev) {
-        if ((win->flags & XGUI_WINDOW_MINIMIZED) && (win->flags & XGUI_WINDOW_VISIBLE)) {
-            if (x >= task_x && x < task_x + task_w) {
-                xgui_window_restore(win);
+
+        /* Check right nav arrow click */
+        if (has_nav) {
+            int right_nav_x = bx + 2;
+            if (x >= right_nav_x && x < right_nav_x + PANEL_NAV_W) {
+                if (panel_task_scroll + max_vis < click_total) panel_task_scroll++;
                 return true;
             }
-            task_x += task_w + 2;
-            task_count++;
         }
     }
     

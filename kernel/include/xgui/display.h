@@ -83,6 +83,13 @@ int xgui_display_init(void);
 void xgui_display_cleanup(void);
 
 /*
+ * Reinitialize display after a VESA mode change.
+ * Reallocates backbuffer and dirty lines for the new resolution.
+ * Returns 0 on success, -1 on failure.
+ */
+int xgui_display_reinit(void);
+
+/*
  * Check if display is available
  */
 bool xgui_display_available(void);
