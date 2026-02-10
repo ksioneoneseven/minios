@@ -13,6 +13,19 @@
 #define XGUI_FONT_WIDTH     8
 #define XGUI_FONT_HEIGHT    16
 
+/* Font IDs */
+#define XGUI_FONT_HELVETICA 0
+#define XGUI_FONT_CLASSIC   1
+#define XGUI_FONT_TAMSYN    2
+#define XGUI_FONT_COUNT     3
+
+/* Font selection */
+void xgui_font_set(int font_id);
+int xgui_font_get(void);
+const char* xgui_font_name(int font_id);
+void xgui_font_load_config(void);
+void xgui_font_save_config(void);
+
 /* Get font bitmap for a character */
 const uint8_t* xgui_font_get_glyph(char c);
 

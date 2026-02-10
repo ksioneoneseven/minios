@@ -11,6 +11,7 @@
 #include "xgui/desktop.h"
 #include "xgui/calculator.h"
 #include "xgui/theme.h"
+#include "xgui/font.h"
 #include "mouse.h"
 #include "keyboard.h"
 #include "vesa.h"
@@ -132,6 +133,9 @@ int xgui_init(void) {
     
     /* Initialize theme system (applies Classic theme) */
     xgui_theme_init();
+    
+    /* Load font preference */
+    xgui_font_load_config();
     
     /* Initialize clipboard */
     xgui_clipboard_init();

@@ -1,7 +1,7 @@
 /*
  * MiniOS XGUI Control Panel
  *
- * Appearance settings: wallpaper color swatches and color theme selection.
+ * Tabbed settings: Appearance (wallpaper, themes) and Font selection.
  */
 
 #include "xgui/xgui.h"
@@ -10,6 +10,7 @@
 #include "xgui/widget.h"
 #include "xgui/theme.h"
 #include "xgui/desktop.h"
+#include "xgui/font.h"
 #include "string.h"
 #include "stdio.h"
 #include "keyboard.h"
@@ -17,8 +18,23 @@
 /* Singleton window */
 static xgui_window_t* cp_window = NULL;
 
-/* Theme buttons */
+/* Tab system */
+#define CP_TAB_APPEARANCE  0
+#define CP_TAB_FONT        1
+#define CP_TAB_COUNT       2
+static int cp_active_tab = CP_TAB_APPEARANCE;
+static const char* cp_tab_names[CP_TAB_COUNT] = { "Appearance", "Font" };
+
+#define TAB_BAR_H     24
+#define TAB_BTN_W     100
+#define TAB_BTN_H     22
+#define CONTENT_Y     (TAB_BAR_H + 4)
+
+/* Theme buttons (Appearance tab) */
 static xgui_widget_t* theme_buttons[XGUI_THEME_COUNT];
+
+/* Font buttons (Font tab) */
+static xgui_widget_t* font_buttons[XGUI_FONT_COUNT];
 
 /* Wallpaper color palette (32 colors, 4 rows x 8 cols) */
 #define WALLPAPER_COLOR_COUNT 32
@@ -74,17 +90,25 @@ static xgui_widget_t* wp_clear_btn = NULL;
 static xgui_widget_t* wp_mode_btns[WP_MODE_COUNT];
 static const char* wp_mode_names[WP_MODE_COUNT] = { "Center", "Fill", "Fit" };
 
-/* Layout constants */
+/* Appearance tab layout (relative to CONTENT_Y) */
 #define SWATCH_SIZE   24
 #define SWATCH_GAP    4
 #define SWATCH_COLS   8
 #define SWATCH_ROWS   4
 #define SWATCH_X      10
-#define SWATCH_Y      30
-#define WP_FILE_Y     148
-#define THEME_Y       250
+#define SWATCH_Y      (CONTENT_Y + 20)
+#define WP_FILE_Y     (CONTENT_Y + 138)
+#define THEME_Y       (CONTENT_Y + 240)
 #define THEME_BTN_W   100
 #define THEME_BTN_H   24
+
+/* Font tab layout */
+#define FONT_BTN_W    140
+#define FONT_BTN_H    28
+
+/* Forward declarations */
+static void cp_destroy_tab_widgets(void);
+static void cp_create_tab_widgets(void);
 
 /*
  * Wallpaper Set button click
@@ -95,7 +119,6 @@ static void wp_set_click(xgui_widget_t* widget) {
     int ret = xgui_desktop_set_wallpaper(wp_path);
     if (ret == 0) {
         strncpy(wp_status, "Wallpaper set!", sizeof(wp_status));
-        /* Save path to config for persistence */
         xgui_theme_save_wallpaper_path(wp_path);
     } else {
         strncpy(wp_status, "Failed to load BMP", sizeof(wp_status));
@@ -136,11 +159,132 @@ static void theme_button_click(xgui_widget_t* widget) {
 }
 
 /*
- * Paint callback — draws swatches manually, widgets drawn by toolkit
+ * Font button click callback
  */
-static void cp_paint(xgui_window_t* win) {
+static void font_button_click(xgui_widget_t* widget) {
+    int id = (int)(uint32_t)xgui_widget_get_userdata(widget);
+    xgui_font_set(id);
+    xgui_font_save_config();
+    if (cp_window) cp_window->dirty = true;
+}
+
+/*
+ * Destroy all widgets for the current tab
+ */
+static void cp_destroy_tab_widgets(void) {
+    if (!cp_window) return;
+    xgui_widgets_destroy_all(cp_window);
+    wp_set_btn = NULL;
+    wp_clear_btn = NULL;
+    for (int i = 0; i < (int)WP_MODE_COUNT; i++) wp_mode_btns[i] = NULL;
+    for (int i = 0; i < (int)XGUI_THEME_COUNT; i++) theme_buttons[i] = NULL;
+    for (int i = 0; i < XGUI_FONT_COUNT; i++) font_buttons[i] = NULL;
+}
+
+/*
+ * Create widgets for the active tab
+ */
+static void cp_create_tab_widgets(void) {
+    if (!cp_window) return;
+
+    if (cp_active_tab == CP_TAB_APPEARANCE) {
+        /* Wallpaper Set / Clear buttons */
+        wp_set_btn = xgui_button_create(cp_window, 10, WP_FILE_Y + 34, 60, 22, "Set");
+        if (wp_set_btn) xgui_widget_set_onclick(wp_set_btn, wp_set_click);
+        wp_clear_btn = xgui_button_create(cp_window, 76, WP_FILE_Y + 34, 60, 22, "Clear");
+        if (wp_clear_btn) xgui_widget_set_onclick(wp_clear_btn, wp_clear_click);
+
+        /* Wallpaper display mode buttons */
+        for (int i = 0; i < (int)WP_MODE_COUNT; i++) {
+            int bx = 75 + i * 58;
+            int by = WP_FILE_Y + 60;
+            wp_mode_btns[i] = xgui_button_create(cp_window, bx, by, 54, 22, wp_mode_names[i]);
+            if (wp_mode_btns[i]) {
+                xgui_widget_set_onclick(wp_mode_btns[i], wp_mode_click);
+                xgui_widget_set_userdata(wp_mode_btns[i], (void*)(uint32_t)i);
+            }
+        }
+
+        /* Theme buttons in two columns */
+        for (int i = 0; i < (int)XGUI_THEME_COUNT; i++) {
+            int col = i % 2;
+            int row = i / 2;
+            int bx = 15 + col * (THEME_BTN_W + 10);
+            int by = THEME_Y + 10 + row * (THEME_BTN_H + 6);
+            theme_buttons[i] = xgui_button_create(cp_window, bx, by,
+                                                   THEME_BTN_W, THEME_BTN_H,
+                                                   xgui_theme_name((xgui_theme_id_t)i));
+            if (theme_buttons[i]) {
+                xgui_widget_set_onclick(theme_buttons[i], theme_button_click);
+                xgui_widget_set_userdata(theme_buttons[i], (void*)(uint32_t)i);
+            }
+        }
+    } else if (cp_active_tab == CP_TAB_FONT) {
+        /* Font buttons */
+        for (int i = 0; i < XGUI_FONT_COUNT; i++) {
+            int by = CONTENT_Y + 40 + i * (FONT_BTN_H + 8);
+            font_buttons[i] = xgui_button_create(cp_window, 15, by,
+                                                  FONT_BTN_W, FONT_BTN_H,
+                                                  xgui_font_name(i));
+            if (font_buttons[i]) {
+                xgui_widget_set_onclick(font_buttons[i], font_button_click);
+                xgui_widget_set_userdata(font_buttons[i], (void*)(uint32_t)i);
+            }
+        }
+    }
+}
+
+/*
+ * Switch to a different tab
+ */
+static void cp_switch_tab(int tab) {
+    if (tab == cp_active_tab) return;
+    if (tab < 0 || tab >= CP_TAB_COUNT) return;
+    wp_input_active = false;
+    cp_destroy_tab_widgets();
+    cp_active_tab = tab;
+    cp_create_tab_widgets();
+    if (cp_window) cp_window->dirty = true;
+}
+
+/*
+ * Draw tab bar at the top
+ */
+static void cp_draw_tabs(xgui_window_t* win) {
+    /* Tab bar background */
+    xgui_win_rect_filled(win, 0, 0, win->buf_width, TAB_BAR_H, XGUI_RGB(220, 220, 220));
+    xgui_win_hline(win, 0, TAB_BAR_H, win->buf_width, XGUI_DARK_GRAY);
+
+    for (int i = 0; i < CP_TAB_COUNT; i++) {
+        int tx = 4 + i * (TAB_BTN_W + 4);
+        int ty = 1;
+
+        if (i == cp_active_tab) {
+            /* Active tab: white background, no bottom border */
+            xgui_win_rect_filled(win, tx, ty, TAB_BTN_W, TAB_BTN_H + 1, XGUI_WHITE);
+            xgui_win_hline(win, tx, ty, TAB_BTN_W, XGUI_DARK_GRAY);
+            xgui_win_rect_filled(win, tx, ty + 1, 1, TAB_BTN_H, XGUI_DARK_GRAY);
+            xgui_win_rect_filled(win, tx + TAB_BTN_W - 1, ty + 1, 1, TAB_BTN_H, XGUI_DARK_GRAY);
+        } else {
+            /* Inactive tab: gray background */
+            xgui_win_rect_filled(win, tx, ty + 2, TAB_BTN_W, TAB_BTN_H - 2, XGUI_RGB(200, 200, 200));
+            xgui_win_rect(win, tx, ty + 2, TAB_BTN_W, TAB_BTN_H - 2, XGUI_DARK_GRAY);
+        }
+
+        /* Tab label centered */
+        int tw = xgui_font_string_width(cp_tab_names[i]);
+        int lx = tx + (TAB_BTN_W - tw) / 2;
+        int ly = ty + (TAB_BTN_H - 16) / 2 + (i == cp_active_tab ? 0 : 2);
+        xgui_win_text_transparent(win, lx, ly, cp_tab_names[i], XGUI_BLACK);
+    }
+}
+
+/*
+ * Paint: Appearance tab
+ */
+static void cp_paint_appearance(xgui_window_t* win) {
     /* Section label: Wallpaper Color */
-    xgui_win_text_transparent(win, 10, 10, "Wallpaper Color", XGUI_BLACK);
+    xgui_win_text_transparent(win, 10, CONTENT_Y + 4, "Wallpaper Color", XGUI_BLACK);
 
     /* Draw color swatches */
     uint32_t current_bg = xgui_theme_current()->desktop_bg;
@@ -150,10 +294,8 @@ static void cp_paint(xgui_window_t* win) {
         int x = SWATCH_X + col * (SWATCH_SIZE + SWATCH_GAP);
         int y = SWATCH_Y + row * (SWATCH_SIZE + SWATCH_GAP);
 
-        /* Swatch fill */
         xgui_win_rect_filled(win, x, y, SWATCH_SIZE, SWATCH_SIZE, wallpaper_colors[i]);
 
-        /* Highlight active swatch */
         if (wallpaper_colors[i] == current_bg) {
             xgui_win_rect(win, x - 2, y - 2, SWATCH_SIZE + 4, SWATCH_SIZE + 4, XGUI_RED);
             xgui_win_rect(win, x - 1, y - 1, SWATCH_SIZE + 2, SWATCH_SIZE + 2, XGUI_RED);
@@ -189,7 +331,7 @@ static void cp_paint(xgui_window_t* win) {
         strncpy(display_path, &wp_path[start], sizeof(display_path) - 1);
         display_path[sizeof(display_path) - 1] = '\0';
     }
-    xgui_win_text(win, input_x + 3, input_y + 2, display_path, XGUI_BLACK, 
+    xgui_win_text(win, input_x + 3, input_y + 2, display_path, XGUI_BLACK,
                   wp_input_active ? XGUI_WHITE : XGUI_RGB(240, 240, 240));
 
     /* Draw cursor if active */
@@ -234,7 +376,6 @@ static void cp_paint(xgui_window_t* win) {
     xgui_theme_id_t cur_id = xgui_theme_current_id();
     for (int i = 0; i < (int)XGUI_THEME_COUNT; i++) {
         if (theme_buttons[i]) {
-            /* Draw a colored indicator next to the active theme */
             int bx = theme_buttons[i]->x;
             int by = theme_buttons[i]->y;
             if ((xgui_theme_id_t)i == cur_id) {
@@ -242,16 +383,57 @@ static void cp_paint(xgui_window_t* win) {
             }
         }
     }
+}
 
-    /* Draw all widgets (theme buttons) */
+/*
+ * Paint: Font tab
+ */
+static void cp_paint_font(xgui_window_t* win) {
+    xgui_win_text_transparent(win, 10, CONTENT_Y + 8, "Select Font", XGUI_BLACK);
+
+    /* Highlight active font button */
+    int cur_font = xgui_font_get();
+    for (int i = 0; i < XGUI_FONT_COUNT; i++) {
+        if (font_buttons[i]) {
+            int bx = font_buttons[i]->x;
+            int by = font_buttons[i]->y;
+            if (i == cur_font) {
+                xgui_win_rect_filled(win, bx - 8, by + 8, 5, 12, XGUI_RGB(0, 160, 0));
+            }
+        }
+    }
+
+    /* Preview area */
+    int preview_y = CONTENT_Y + 40 + XGUI_FONT_COUNT * (FONT_BTN_H + 8) + 16;
+    xgui_win_hline(win, 10, preview_y - 8, win->buf_width - 20, XGUI_DARK_GRAY);
+    xgui_win_text_transparent(win, 10, preview_y, "Preview:", XGUI_BLACK);
+    xgui_win_rect_filled(win, 10, preview_y + 18, win->buf_width - 20, 70, XGUI_WHITE);
+    xgui_win_rect(win, 10, preview_y + 18, win->buf_width - 20, 70, XGUI_DARK_GRAY);
+    xgui_win_text(win, 14, preview_y + 22, "ABCDEFGHIJKLM", XGUI_BLACK, XGUI_WHITE);
+    xgui_win_text(win, 14, preview_y + 38, "nopqrstuvwxyz", XGUI_BLACK, XGUI_WHITE);
+    xgui_win_text(win, 14, preview_y + 54, "0123456789 !@#", XGUI_BLACK, XGUI_WHITE);
+}
+
+/*
+ * Main paint callback
+ */
+static void cp_paint(xgui_window_t* win) {
+    cp_draw_tabs(win);
+
+    if (cp_active_tab == CP_TAB_APPEARANCE) {
+        cp_paint_appearance(win);
+    } else if (cp_active_tab == CP_TAB_FONT) {
+        cp_paint_font(win);
+    }
+
     xgui_widgets_draw(win);
 }
 
 /*
- * Event handler — manual hit-test on swatches, widgets handle theme buttons
+ * Event handler
  */
 static void cp_handler(xgui_window_t* win, xgui_event_t* event) {
-    /* Let widgets handle events first (theme buttons, set/clear buttons) */
+    /* Let widgets handle events first */
     if (xgui_widgets_handle_event(win, event)) {
         return;
     }
@@ -263,14 +445,13 @@ static void cp_handler(xgui_window_t* win, xgui_event_t* event) {
         wp_set_btn = NULL;
         wp_clear_btn = NULL;
         for (int i = 0; i < (int)WP_MODE_COUNT; i++) wp_mode_btns[i] = NULL;
-        for (int i = 0; i < (int)XGUI_THEME_COUNT; i++) {
-            theme_buttons[i] = NULL;
-        }
+        for (int i = 0; i < (int)XGUI_THEME_COUNT; i++) theme_buttons[i] = NULL;
+        for (int i = 0; i < XGUI_FONT_COUNT; i++) font_buttons[i] = NULL;
         return;
     }
 
-    /* Handle keyboard input for wallpaper path */
-    if (wp_input_active && event->type == XGUI_EVENT_KEY_CHAR) {
+    /* Handle keyboard input for wallpaper path (Appearance tab only) */
+    if (cp_active_tab == CP_TAB_APPEARANCE && wp_input_active && event->type == XGUI_EVENT_KEY_CHAR) {
         char c = event->key.character;
         if (c >= 32 && c < 127 && wp_path_len < WP_PATH_MAX - 1) {
             memmove(&wp_path[wp_cursor + 1], &wp_path[wp_cursor],
@@ -283,7 +464,7 @@ static void cp_handler(xgui_window_t* win, xgui_event_t* event) {
         return;
     }
 
-    if (wp_input_active && event->type == XGUI_EVENT_KEY_DOWN) {
+    if (cp_active_tab == CP_TAB_APPEARANCE && wp_input_active && event->type == XGUI_EVENT_KEY_DOWN) {
         uint8_t key = event->key.keycode;
         if (key == '\b' && wp_cursor > 0) {
             memmove(&wp_path[wp_cursor - 1], &wp_path[wp_cursor],
@@ -317,35 +498,48 @@ static void cp_handler(xgui_window_t* win, xgui_event_t* event) {
         int mx = event->mouse.x;
         int my = event->mouse.y;
 
-        /* Check if click is on the wallpaper path input box */
-        int input_x = 10;
-        int input_y = WP_FILE_Y + 12;
-        int input_w = win->buf_width - 20;
-        int input_h = 18;
-        if (mx >= input_x && mx < input_x + input_w &&
-            my >= input_y && my < input_y + input_h) {
-            wp_input_active = true;
-            win->dirty = true;
-            return;
-        } else {
-            if (wp_input_active) {
-                wp_input_active = false;
-                win->dirty = true;
+        /* Check tab bar clicks */
+        if (my < TAB_BAR_H) {
+            for (int i = 0; i < CP_TAB_COUNT; i++) {
+                int tx = 4 + i * (TAB_BTN_W + 4);
+                if (mx >= tx && mx < tx + TAB_BTN_W) {
+                    cp_switch_tab(i);
+                    return;
+                }
             }
+            return;
         }
 
-        /* Check swatch clicks */
-        for (int i = 0; i < WALLPAPER_COLOR_COUNT; i++) {
-            int col = i % SWATCH_COLS;
-            int row = i / SWATCH_COLS;
-            int x = SWATCH_X + col * (SWATCH_SIZE + SWATCH_GAP);
-            int y = SWATCH_Y + row * (SWATCH_SIZE + SWATCH_GAP);
-
-            if (mx >= x && mx < x + SWATCH_SIZE &&
-                my >= y && my < y + SWATCH_SIZE) {
-                xgui_theme_set_desktop_bg(wallpaper_colors[i]);
+        /* Appearance tab: wallpaper input + swatch clicks */
+        if (cp_active_tab == CP_TAB_APPEARANCE) {
+            int input_x = 10;
+            int input_y = WP_FILE_Y + 12;
+            int input_w = win->buf_width - 20;
+            int input_h = 18;
+            if (mx >= input_x && mx < input_x + input_w &&
+                my >= input_y && my < input_y + input_h) {
+                wp_input_active = true;
                 win->dirty = true;
                 return;
+            } else {
+                if (wp_input_active) {
+                    wp_input_active = false;
+                    win->dirty = true;
+                }
+            }
+
+            for (int i = 0; i < WALLPAPER_COLOR_COUNT; i++) {
+                int col = i % SWATCH_COLS;
+                int row = i / SWATCH_COLS;
+                int x = SWATCH_X + col * (SWATCH_SIZE + SWATCH_GAP);
+                int y = SWATCH_Y + row * (SWATCH_SIZE + SWATCH_GAP);
+
+                if (mx >= x && mx < x + SWATCH_SIZE &&
+                    my >= y && my < y + SWATCH_SIZE) {
+                    xgui_theme_set_desktop_bg(wallpaper_colors[i]);
+                    win->dirty = true;
+                    return;
+                }
             }
         }
     }
@@ -361,7 +555,7 @@ void xgui_controlpanel_create(void) {
     }
 
     int win_w = 250;
-    int win_h = 590;
+    int win_h = 490;
     cp_window = xgui_window_create("Control Panel", 200, 80, win_w, win_h,
                                     XGUI_WINDOW_DEFAULT);
     if (!cp_window) return;
@@ -369,36 +563,6 @@ void xgui_controlpanel_create(void) {
     xgui_window_set_paint(cp_window, cp_paint);
     xgui_window_set_handler(cp_window, cp_handler);
 
-    /* Wallpaper Set / Clear buttons */
-    wp_set_btn = xgui_button_create(cp_window, 10, WP_FILE_Y + 34, 60, 22, "Set");
-    if (wp_set_btn) xgui_widget_set_onclick(wp_set_btn, wp_set_click);
-    wp_clear_btn = xgui_button_create(cp_window, 76, WP_FILE_Y + 34, 60, 22, "Clear");
-    if (wp_clear_btn) xgui_widget_set_onclick(wp_clear_btn, wp_clear_click);
-
-    /* Wallpaper display mode buttons */
-    for (int i = 0; i < (int)WP_MODE_COUNT; i++) {
-        int bx = 75 + i * 58;
-        int by = WP_FILE_Y + 60;
-        wp_mode_btns[i] = xgui_button_create(cp_window, bx, by, 54, 22, wp_mode_names[i]);
-        if (wp_mode_btns[i]) {
-            xgui_widget_set_onclick(wp_mode_btns[i], wp_mode_click);
-            xgui_widget_set_userdata(wp_mode_btns[i], (void*)(uint32_t)i);
-        }
-    }
-
-    /* Create theme buttons in two columns */
-    for (int i = 0; i < (int)XGUI_THEME_COUNT; i++) {
-        int col = i % 2;
-        int row = i / 2;
-        int bx = 15 + col * (THEME_BTN_W + 10);
-        int by = THEME_Y + 10 + row * (THEME_BTN_H + 6);
-
-        theme_buttons[i] = xgui_button_create(cp_window, bx, by,
-                                               THEME_BTN_W, THEME_BTN_H,
-                                               xgui_theme_name((xgui_theme_id_t)i));
-        if (theme_buttons[i]) {
-            xgui_widget_set_onclick(theme_buttons[i], theme_button_click);
-            xgui_widget_set_userdata(theme_buttons[i], (void*)(uint32_t)i);
-        }
-    }
+    cp_active_tab = CP_TAB_APPEARANCE;
+    cp_create_tab_widgets();
 }
