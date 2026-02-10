@@ -58,7 +58,7 @@ void xgui_panel_draw(void);
  * Handle panel click
  * Returns true if click was handled
  */
-bool xgui_panel_click(int x, int y);
+bool xgui_panel_click(int x, int y, int button);
 
 /*
  * Update panel (e.g., clock)
@@ -91,5 +91,19 @@ wp_mode_t xgui_desktop_get_wp_mode(void);
  * Check if a BMP wallpaper is currently loaded
  */
 bool xgui_desktop_has_wallpaper(void);
+
+/*
+ * Desktop icon management
+ */
+#define DICON_TYPE_APP  0
+#define DICON_TYPE_FILE 1
+bool xgui_desktop_add_icon(int type, const char* name, const char* path);
+void xgui_desktop_draw_icons(void);
+void xgui_desktop_draw_popups(void);
+bool xgui_desktop_icon_click(int x, int y, int button);
+void xgui_desktop_icon_mouse_move(int x, int y);
+bool xgui_desktop_icon_mouse_up(int x, int y);
+bool xgui_desktop_popup_visible(void);
+bool xgui_desktop_dragging(void);
 
 #endif /* _XGUI_DESKTOP_H */

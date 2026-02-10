@@ -58,6 +58,7 @@ void xgui_about_create(void);
 void xgui_notepad_create(void);
 void xgui_paint_create(void);
 void xgui_explorer_create(void);
+void xgui_explorer_open_path(const char* path);
 void xgui_terminal_create(void);
 void xgui_controlpanel_create(void);
 void xgui_gui_editor_create(void);

@@ -399,9 +399,50 @@ void xgui_run(void) {
                 continue;
             }
 
-            /* Handle panel clicks */
+            /* Handle desktop icon dragging (intercept move/up while drag active) */
+            if (xgui_desktop_dragging()) {
+                if (event.type == XGUI_EVENT_MOUSE_MOVE) {
+                    xgui_desktop_icon_mouse_move(event.mouse.x, event.mouse.y);
+                    needs_redraw = true;
+                    continue;
+                }
+                if (event.type == XGUI_EVENT_MOUSE_UP) {
+                    xgui_desktop_icon_mouse_up(event.mouse.x, event.mouse.y);
+                    needs_redraw = true;
+                    continue;
+                }
+                /* Swallow other mouse events during drag */
+                if (event.type == XGUI_EVENT_MOUSE_DOWN ||
+                    event.type == XGUI_EVENT_MOUSE_CLICK ||
+                    event.type == XGUI_EVENT_MOUSE_DBLCLICK) {
+                    needs_redraw = true;
+                    continue;
+                }
+            }
+
+            /* Handle desktop popup menus (icon remove, add-to-desktop) */
+            if (xgui_desktop_popup_visible()) {
+                if (event.type == XGUI_EVENT_MOUSE_MOVE) {
+                    xgui_desktop_icon_mouse_move(event.mouse.x, event.mouse.y);
+                    needs_redraw = true;
+                    continue;
+                }
+                if (event.type == XGUI_EVENT_MOUSE_DOWN) {
+                    xgui_desktop_icon_click(event.mouse.x, event.mouse.y, event.mouse.button);
+                    needs_redraw = true;
+                    continue;
+                }
+                if (event.type == XGUI_EVENT_MOUSE_UP ||
+                    event.type == XGUI_EVENT_MOUSE_CLICK ||
+                    event.type == XGUI_EVENT_MOUSE_DBLCLICK) {
+                    needs_redraw = true;
+                    continue;
+                }
+            }
+
+            /* Handle panel and start menu clicks */
             if (event.type == XGUI_EVENT_MOUSE_DOWN) {
-                if (xgui_panel_click(event.mouse.x, event.mouse.y)) {
+                if (xgui_panel_click(event.mouse.x, event.mouse.y, event.mouse.button)) {
                     needs_redraw = true;
                     continue;
                 }
@@ -409,9 +450,24 @@ void xgui_run(void) {
 
             /* Mouse move: dispatch for drag and drawing */
             if (event.type == XGUI_EVENT_MOUSE_MOVE) {
+                xgui_desktop_icon_mouse_move(event.mouse.x, event.mouse.y);
                 xgui_wm_dispatch_event(&event);
                 needs_redraw = true;
                 continue;
+            }
+
+            /* Desktop icon clicks — only when no window is under the cursor */
+            if (event.type == XGUI_EVENT_MOUSE_DOWN &&
+                !xgui_wm_window_at(event.mouse.x, event.mouse.y)) {
+                if (xgui_desktop_icon_click(event.mouse.x, event.mouse.y, event.mouse.button)) {
+                    needs_redraw = true;
+                    continue;
+                }
+            }
+
+            /* Desktop icon mouse up (end non-drag click) */
+            if (event.type == XGUI_EVENT_MOUSE_UP) {
+                xgui_desktop_icon_mouse_up(event.mouse.x, event.mouse.y);
             }
 
             /* Dispatch to window manager (sets dirty flags on windows) */
@@ -445,9 +501,11 @@ void xgui_run(void) {
         if (needs_redraw) {
             /* Rebuild the screen backbuffer */
             xgui_desktop_draw();
+            xgui_desktop_draw_icons();
             xgui_wm_composite();
             xgui_panel_draw();
             xgui_draw_start_menu();
+            xgui_desktop_draw_popups();
 
             /* Draw context menu overlay (on top of everything) */
             xgui_contextmenu_draw();

@@ -15,6 +15,7 @@
 #include "serial.h"
 #include "rtc.h"
 #include "vfs.h"
+#include "conf.h"
 #include "shell.h"
 #include "heap.h"
 #include "stdio.h"
@@ -36,6 +37,60 @@ static int panel_y = 0;
 
 /* Start menu state */
 static bool start_menu_open = false;
+
+/* ------------------------------------------------------------------ */
+/*  Desktop Icons                                                      */
+/* ------------------------------------------------------------------ */
+
+#define DICON_MAX       24
+#define DICON_W         64
+#define DICON_H         56
+#define DICON_PAD_X     12
+#define DICON_PAD_Y     8
+#define DICON_ICON_SZ   24
+#define DICON_LABEL_MAX 20
+
+/* Icon types defined in desktop.h: DICON_TYPE_APP, DICON_TYPE_FILE */
+
+typedef struct {
+    bool    used;
+    int     type;                       /* DICON_TYPE_APP or DICON_TYPE_FILE */
+    char    name[DICON_LABEL_MAX];      /* Display label */
+    char    path[128];                  /* App id (e.g. "terminal") or file path */
+    int     grid_col;                   /* Grid column (0 = leftmost) */
+    int     grid_row;                   /* Grid row (0 = topmost) */
+} desktop_icon_t;
+
+static desktop_icon_t dicons[DICON_MAX];
+static int dicon_count = 0;
+static int dicon_selected = -1;         /* Currently selected icon index */
+static uint32_t dicon_last_click_tick = 0;
+static int dicon_last_click_idx = -1;
+
+/* Desktop icon drag state */
+static bool dicon_dragging = false;
+static int dicon_drag_idx = -1;         /* Icon being dragged */
+static int dicon_drag_ox = 0;           /* Pixel offset from icon top-left to grab point */
+static int dicon_drag_oy = 0;
+static int dicon_drag_px = 0;           /* Current pixel position of dragged icon */
+static int dicon_drag_py = 0;
+static bool dicon_drag_started = false; /* True once mouse moved enough to start drag */
+static int dicon_drag_start_mx = 0;     /* Mouse position at initial click */
+static int dicon_drag_start_my = 0;
+
+/* Desktop icon right-click context menu */
+static bool dicon_ctx_visible = false;
+static int dicon_ctx_x = 0;
+static int dicon_ctx_y = 0;
+static int dicon_ctx_idx = -1;          /* Icon index that was right-clicked */
+static int dicon_ctx_hover = -1;
+
+/* Start menu right-click "Add to Desktop" popup */
+static bool smenu_ctx_visible = false;
+static int smenu_ctx_x = 0;
+static int smenu_ctx_y = 0;
+static int smenu_ctx_item = -1;         /* Start menu item index */
+static int smenu_ctx_hover = -1;
 
 /* XP-style two-column menu */
 static int menu_hover_item = -1;   /* Hovered item index (-1 = none) */
@@ -124,6 +179,320 @@ static void draw_drop_shadow(int x, int y, int w, int h, int depth) {
     }
 }
 
+/* Forward declarations for apps used by desktop icons */
+extern void xgui_skigame_create(void);
+extern void xgui_flappycat_create(void);
+
+/* ------------------------------------------------------------------ */
+/*  Desktop Icon helpers                                               */
+/* ------------------------------------------------------------------ */
+
+/* Find next free grid position (column-major, top to bottom) */
+static void dicon_next_free_pos(int* out_col, int* out_row) {
+    int desk_h = screen_height - XGUI_PANEL_HEIGHT;
+    int max_rows = (desk_h - DICON_PAD_Y) / (DICON_H + DICON_PAD_Y);
+    if (max_rows < 1) max_rows = 1;
+    int max_cols = (screen_width - DICON_PAD_X) / (DICON_W + DICON_PAD_X);
+    if (max_cols < 1) max_cols = 1;
+
+    for (int c = 0; c < max_cols; c++) {
+        for (int r = 0; r < max_rows; r++) {
+            bool taken = false;
+            for (int i = 0; i < DICON_MAX; i++) {
+                if (dicons[i].used && dicons[i].grid_col == c && dicons[i].grid_row == r) {
+                    taken = true;
+                    break;
+                }
+            }
+            if (!taken) {
+                *out_col = c;
+                *out_row = r;
+                return;
+            }
+        }
+    }
+    *out_col = 0;
+    *out_row = 0;
+}
+
+/* Get pixel position of an icon */
+static void dicon_get_rect(int idx, int* x, int* y, int* w, int* h) {
+    *x = DICON_PAD_X + dicons[idx].grid_col * (DICON_W + DICON_PAD_X);
+    *y = DICON_PAD_Y + dicons[idx].grid_row * (DICON_H + DICON_PAD_Y);
+    *w = DICON_W;
+    *h = DICON_H;
+}
+
+/* Save desktop icons to /mnt/conf/desktop.conf */
+static void dicon_save(void) {
+    conf_section_t sec;
+    memset(&sec, 0, sizeof(sec));
+    strncpy(sec.name, "desktop", sizeof(sec.name) - 1);
+
+    char key[16];
+    char val[192];
+    int n = 0;
+    for (int i = 0; i < DICON_MAX && n < CONF_MAX_ENTRIES; i++) {
+        if (!dicons[i].used) continue;
+        snprintf(key, sizeof(key), "icon%d", n);
+        snprintf(val, sizeof(val), "%d,%d,%d,%s,%s",
+                 dicons[i].type, dicons[i].grid_col, dicons[i].grid_row,
+                 dicons[i].name, dicons[i].path);
+        conf_set(&sec, key, val);
+        n++;
+    }
+    conf_set_int(&sec, "count", n);
+    conf_save(&sec);
+}
+
+/* Load desktop icons from /mnt/conf/desktop.conf */
+static void dicon_load(void) {
+    conf_section_t sec;
+    memset(&sec, 0, sizeof(sec));
+    if (conf_load(&sec, "desktop") < 0) return;
+
+    int count = conf_get_int(&sec, "count", 0);
+    if (count > DICON_MAX) count = DICON_MAX;
+
+    dicon_count = 0;
+    memset(dicons, 0, sizeof(dicons));
+
+    for (int i = 0; i < count; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "icon%d", i);
+        const char* val = conf_get(&sec, key, NULL);
+        if (!val) continue;
+
+        /* Parse: type,col,row,name,path */
+        int type = 0, col = 0, row = 0;
+        const char* p = val;
+
+        /* type */
+        while (*p >= '0' && *p <= '9') { type = type * 10 + (*p - '0'); p++; }
+        if (*p == ',') p++;
+
+        /* col */
+        while (*p >= '0' && *p <= '9') { col = col * 10 + (*p - '0'); p++; }
+        if (*p == ',') p++;
+
+        /* row */
+        while (*p >= '0' && *p <= '9') { row = row * 10 + (*p - '0'); p++; }
+        if (*p == ',') p++;
+
+        /* name (up to next comma) */
+        char name[DICON_LABEL_MAX];
+        int ni = 0;
+        while (*p && *p != ',' && ni < DICON_LABEL_MAX - 1) { name[ni++] = *p++; }
+        name[ni] = '\0';
+        if (*p == ',') p++;
+
+        /* path (rest of string) */
+        if (dicon_count < DICON_MAX) {
+            dicons[dicon_count].used = true;
+            dicons[dicon_count].type = type;
+            dicons[dicon_count].grid_col = col;
+            dicons[dicon_count].grid_row = row;
+            strncpy(dicons[dicon_count].name, name, DICON_LABEL_MAX - 1);
+            dicons[dicon_count].name[DICON_LABEL_MAX - 1] = '\0';
+            strncpy(dicons[dicon_count].path, p, 127);
+            dicons[dicon_count].path[127] = '\0';
+            dicon_count++;
+        }
+    }
+    serial_write_string("DESKTOP: loaded icons\n");
+}
+
+/* Add a desktop icon. Returns true if added. */
+bool xgui_desktop_add_icon(int type, const char* name, const char* path) {
+    /* Check for duplicate */
+    for (int i = 0; i < DICON_MAX; i++) {
+        if (dicons[i].used && dicons[i].type == type && strcmp(dicons[i].path, path) == 0) {
+            return false; /* Already exists */
+        }
+    }
+    /* Find free slot */
+    int slot = -1;
+    for (int i = 0; i < DICON_MAX; i++) {
+        if (!dicons[i].used) { slot = i; break; }
+    }
+    if (slot < 0) return false;
+
+    dicons[slot].used = true;
+    dicons[slot].type = type;
+    strncpy(dicons[slot].name, name, DICON_LABEL_MAX - 1);
+    dicons[slot].name[DICON_LABEL_MAX - 1] = '\0';
+    strncpy(dicons[slot].path, path, 127);
+    dicons[slot].path[127] = '\0';
+    dicon_next_free_pos(&dicons[slot].grid_col, &dicons[slot].grid_row);
+    dicon_count++;
+    dicon_save();
+    return true;
+}
+
+/* Remove a desktop icon by index */
+static void dicon_remove(int idx) {
+    if (idx < 0 || idx >= DICON_MAX || !dicons[idx].used) return;
+    dicons[idx].used = false;
+    memset(&dicons[idx], 0, sizeof(desktop_icon_t));
+    dicon_count--;
+    if (dicon_count < 0) dicon_count = 0;
+    dicon_save();
+}
+
+/* Launch a desktop icon */
+static void dicon_launch(int idx) {
+    if (idx < 0 || idx >= DICON_MAX || !dicons[idx].used) return;
+
+    if (dicons[idx].type == DICON_TYPE_APP) {
+        const char* id = dicons[idx].path;
+        if (strcmp(id, "terminal") == 0)         xgui_terminal_create();
+        else if (strcmp(id, "explorer") == 0)     xgui_explorer_create();
+        else if (strcmp(id, "editor") == 0)       xgui_gui_editor_create();
+        else if (strcmp(id, "spreadsheet") == 0)  xgui_gui_spreadsheet_create();
+        else if (strcmp(id, "calculator") == 0)   xgui_calculator_create();
+        else if (strcmp(id, "paint") == 0)        xgui_paint_create();
+        else if (strcmp(id, "notepad") == 0)      xgui_notepad_create();
+        else if (strcmp(id, "calendar") == 0)     xgui_calendar_create();
+        else if (strcmp(id, "clock") == 0)        xgui_analogclock_create();
+        else if (strcmp(id, "skigame") == 0)      xgui_skigame_create();
+        else if (strcmp(id, "flappycat") == 0)    xgui_flappycat_create();
+        else if (strcmp(id, "controlpanel") == 0) xgui_controlpanel_create();
+        else if (strcmp(id, "taskmgr") == 0)      xgui_taskmgr_create();
+        else if (strcmp(id, "diskutil") == 0)     xgui_diskutil_create();
+        else if (strcmp(id, "about") == 0)        xgui_about_create();
+        else if (strcmp(id, "clocksettings") == 0) xgui_clock_settings_create();
+    } else if (dicons[idx].type == DICON_TYPE_FILE) {
+        /* Open directory with explorer at that path, or file with appropriate app */
+        vfs_node_t* node = vfs_lookup(dicons[idx].path);
+        if (node && (node->flags & VFS_DIRECTORY)) {
+            xgui_explorer_open_path(dicons[idx].path);
+        } else {
+            /* Check file extension to pick the right app */
+            const char* p = dicons[idx].path;
+            const char* ext = NULL;
+            for (const char* s = p; *s; s++) {
+                if (*s == '.') ext = s;
+            }
+            if (ext && strcmp(ext, ".csv") == 0) {
+                xgui_gui_spreadsheet_open_file(dicons[idx].path);
+            } else {
+                xgui_gui_editor_open_file(dicons[idx].path);
+            }
+        }
+    }
+}
+
+/* Draw a small app icon (generic) */
+static void dicon_draw_app_icon(int cx, int cy) {
+    /* Simple colored square with window-like appearance */
+    xgui_display_rect_filled(cx, cy, DICON_ICON_SZ, DICON_ICON_SZ, XGUI_RGB(60, 120, 200));
+    xgui_display_rect_filled(cx + 1, cy + 1, DICON_ICON_SZ - 2, 5, XGUI_RGB(40, 80, 160));
+    xgui_display_rect_filled(cx + 2, cy + 7, DICON_ICON_SZ - 4, DICON_ICON_SZ - 9, XGUI_WHITE);
+    xgui_display_rect(cx, cy, DICON_ICON_SZ, DICON_ICON_SZ, XGUI_RGB(30, 60, 120));
+}
+
+/* Draw a small folder icon */
+static void dicon_draw_folder_icon(int cx, int cy) {
+    xgui_display_rect_filled(cx, cy + 2, 8, 4, XGUI_RGB(220, 180, 60));
+    xgui_display_rect_filled(cx, cy + 4, DICON_ICON_SZ, DICON_ICON_SZ - 4, XGUI_RGB(240, 200, 80));
+    xgui_display_hline(cx + 1, cy + 5, DICON_ICON_SZ - 2, XGUI_RGB(255, 230, 140));
+    xgui_display_rect(cx, cy + 4, DICON_ICON_SZ, DICON_ICON_SZ - 4, XGUI_RGB(180, 140, 40));
+}
+
+/* Draw a small file icon */
+static void dicon_draw_file_icon(int cx, int cy) {
+    xgui_display_rect_filled(cx + 2, cy, DICON_ICON_SZ - 4, DICON_ICON_SZ, XGUI_WHITE);
+    xgui_display_rect(cx + 2, cy, DICON_ICON_SZ - 4, DICON_ICON_SZ, XGUI_RGB(140, 140, 140));
+    xgui_display_rect_filled(cx + DICON_ICON_SZ - 6, cy, 4, 4, XGUI_RGB(200, 200, 200));
+    xgui_display_hline(cx + 5, cy + 6, DICON_ICON_SZ - 10, XGUI_RGB(180, 200, 220));
+    xgui_display_hline(cx + 5, cy + 9, DICON_ICON_SZ - 10, XGUI_RGB(180, 200, 220));
+    xgui_display_hline(cx + 5, cy + 12, DICON_ICON_SZ - 12, XGUI_RGB(180, 200, 220));
+}
+
+/* Draw all desktop icons (called before wm_composite so windows appear on top) */
+void xgui_desktop_draw_icons(void) {
+    for (int i = 0; i < DICON_MAX; i++) {
+        if (!dicons[i].used) continue;
+
+        int ix, iy, iw, ih;
+        dicon_get_rect(i, &ix, &iy, &iw, &ih);
+
+        /* If this icon is being dragged, draw it at the drag position instead */
+        if (dicon_dragging && dicon_drag_started && i == dicon_drag_idx) {
+            ix = dicon_drag_px;
+            iy = dicon_drag_py;
+        }
+
+        /* Selection highlight */
+        if (i == dicon_selected) {
+            xgui_display_rect_filled(ix, iy, iw, ih, XGUI_RGB(60, 100, 180));
+        }
+
+        /* Icon graphic centered horizontally */
+        int icon_x = ix + (iw - DICON_ICON_SZ) / 2;
+        int icon_y = iy + 2;
+
+        if (dicons[i].type == DICON_TYPE_APP) {
+            dicon_draw_app_icon(icon_x, icon_y);
+        } else {
+            vfs_node_t* node = vfs_lookup(dicons[i].path);
+            if (node && (node->flags & VFS_DIRECTORY)) {
+                dicon_draw_folder_icon(icon_x, icon_y);
+            } else {
+                dicon_draw_file_icon(icon_x, icon_y);
+            }
+        }
+
+        /* Label centered below icon */
+        int tw = xgui_display_text_width(dicons[i].name);
+        int tx = ix + (iw - tw) / 2;
+        int ty = iy + DICON_ICON_SZ + 6;
+        if (tx < ix) tx = ix;
+
+        /* Text shadow for readability */
+        xgui_display_text_transparent(tx + 1, ty + 1, dicons[i].name, XGUI_RGB(0, 0, 0));
+        uint32_t text_col = (i == dicon_selected) ? XGUI_WHITE : XGUI_RGB(255, 255, 255);
+        xgui_display_text_transparent(tx, ty, dicons[i].name, text_col);
+    }
+}
+
+/* Draw desktop popup menus (called after start menu so popups appear on top) */
+void xgui_desktop_draw_popups(void) {
+    /* Desktop icon context menu (Remove Shortcut) */
+    if (dicon_ctx_visible) {
+        int mw = 160, mh = 24;
+        xgui_display_rect_filled(dicon_ctx_x + 2, dicon_ctx_y + 2, mw, mh, XGUI_RGB(40, 40, 40));
+        xgui_display_rect_filled(dicon_ctx_x, dicon_ctx_y, mw, mh, XGUI_RGB(250, 250, 250));
+        xgui_display_rect(dicon_ctx_x, dicon_ctx_y, mw, mh, XGUI_RGB(160, 160, 160));
+        if (dicon_ctx_hover == 0) {
+            xgui_display_rect_filled(dicon_ctx_x + 1, dicon_ctx_y + 1, mw - 2, mh - 2,
+                                     XGUI_RGB(51, 153, 255));
+            xgui_display_text_transparent(dicon_ctx_x + 8, dicon_ctx_y + 4,
+                                          "Remove Shortcut", XGUI_WHITE);
+        } else {
+            xgui_display_text_transparent(dicon_ctx_x + 8, dicon_ctx_y + 4,
+                                          "Remove Shortcut", XGUI_BLACK);
+        }
+    }
+
+    /* Start menu "Add to Desktop" context menu */
+    if (smenu_ctx_visible) {
+        int mw = 180, mh = 24;
+        xgui_display_rect_filled(smenu_ctx_x + 2, smenu_ctx_y + 2, mw, mh, XGUI_RGB(40, 40, 40));
+        xgui_display_rect_filled(smenu_ctx_x, smenu_ctx_y, mw, mh, XGUI_RGB(250, 250, 250));
+        xgui_display_rect(smenu_ctx_x, smenu_ctx_y, mw, mh, XGUI_RGB(160, 160, 160));
+        if (smenu_ctx_hover == 0) {
+            xgui_display_rect_filled(smenu_ctx_x + 1, smenu_ctx_y + 1, mw - 2, mh - 2,
+                                     XGUI_RGB(51, 153, 255));
+            xgui_display_text_transparent(smenu_ctx_x + 8, smenu_ctx_y + 4,
+                                          "Add Shortcut to Desktop", XGUI_WHITE);
+        } else {
+            xgui_display_text_transparent(smenu_ctx_x + 8, smenu_ctx_y + 4,
+                                          "Add Shortcut to Desktop", XGUI_BLACK);
+        }
+    }
+}
+
 /*
  * Initialize the desktop
  */
@@ -131,6 +500,9 @@ void xgui_desktop_init(void) {
     screen_width = xgui_display_width();
     screen_height = xgui_display_height();
     desktop_color = XGUI_DESKTOP_BG;
+    memset(dicons, 0, sizeof(dicons));
+    dicon_count = 0;
+    dicon_load();
 }
 
 /*
@@ -835,10 +1207,219 @@ void xgui_draw_start_menu(void) {
     xgui_display_mark_dirty(menu_y, panel_y);
 }
 
+/* App ID table matching start menu indices */
+static const char* smenu_app_ids[] = {
+    "terminal", "explorer", "editor", "spreadsheet",
+    "calculator", "paint", "notepad", "calendar",
+    "clock", "skigame", "flappycat",
+    /* RIGHT_BASE (11) onwards: */
+    "controlpanel", "taskmgr", "diskutil", "about", "clocksettings"
+};
+#define SMENU_APP_ID_COUNT (int)(sizeof(smenu_app_ids) / sizeof(smenu_app_ids[0]))
+
+/*
+ * Handle desktop icon click/right-click.
+ * Called from xgui.c for clicks on the desktop area (not on windows/panel).
+ * Returns true if the click was consumed.
+ */
+bool xgui_desktop_icon_click(int x, int y, int button) {
+    /* Handle desktop icon context menu (Remove Shortcut) clicks */
+    if (dicon_ctx_visible) {
+        int mw = 160, mh = 24;
+        if (button == XGUI_MOUSE_LEFT &&
+            x >= dicon_ctx_x && x < dicon_ctx_x + mw &&
+            y >= dicon_ctx_y && y < dicon_ctx_y + mh) {
+            dicon_remove(dicon_ctx_idx);
+            dicon_selected = -1;
+        }
+        dicon_ctx_visible = false;
+        dicon_ctx_hover = -1;
+        return true;
+    }
+
+    /* Handle start menu "Add to Desktop" context menu clicks */
+    if (smenu_ctx_visible) {
+        int mw = 180, mh = 24;
+        if (button == XGUI_MOUSE_LEFT &&
+            x >= smenu_ctx_x && x < smenu_ctx_x + mw &&
+            y >= smenu_ctx_y && y < smenu_ctx_y + mh) {
+            /* Add the app shortcut */
+            if (smenu_ctx_item >= 0 && smenu_ctx_item < SMENU_APP_ID_COUNT) {
+                const char* label;
+                if (smenu_ctx_item < LEFT_COUNT)
+                    label = left_labels[smenu_ctx_item];
+                else
+                    label = right_labels[smenu_ctx_item - RIGHT_BASE];
+                xgui_desktop_add_icon(DICON_TYPE_APP, label,
+                                      smenu_app_ids[smenu_ctx_item]);
+            }
+        }
+        smenu_ctx_visible = false;
+        smenu_ctx_hover = -1;
+        start_menu_open = false;
+        return true;
+    }
+
+    /* Check if click is on a desktop icon */
+    for (int i = 0; i < DICON_MAX; i++) {
+        if (!dicons[i].used) continue;
+        int ix, iy, iw, ih;
+        dicon_get_rect(i, &ix, &iy, &iw, &ih);
+        if (x >= ix && x < ix + iw && y >= iy && y < iy + ih) {
+            if (button == XGUI_MOUSE_RIGHT) {
+                /* Right-click: show remove context menu */
+                dicon_ctx_visible = true;
+                dicon_ctx_x = x;
+                dicon_ctx_y = y;
+                dicon_ctx_idx = i;
+                dicon_ctx_hover = -1;
+                dicon_selected = i;
+                return true;
+            }
+            /* Left-click: select and begin potential drag */
+            dicon_selected = i;
+            dicon_dragging = true;
+            dicon_drag_idx = i;
+            dicon_drag_started = false;
+            dicon_drag_start_mx = x;
+            dicon_drag_start_my = y;
+            dicon_drag_ox = x - ix;
+            dicon_drag_oy = y - iy;
+            dicon_drag_px = ix;
+            dicon_drag_py = iy;
+
+            /* Double-click detection */
+            uint32_t now = timer_get_ticks();
+            if (i == dicon_last_click_idx && (now - dicon_last_click_tick) < 50) {
+                dicon_launch(i);
+                dicon_selected = -1;
+                dicon_last_click_idx = -1;
+                dicon_dragging = false;
+            } else {
+                dicon_last_click_idx = i;
+                dicon_last_click_tick = now;
+            }
+            return true;
+        }
+    }
+
+    /* Click on empty desktop: deselect */
+    dicon_selected = -1;
+    return false;
+}
+
+/*
+ * Snap pixel position to nearest grid cell, clamped to desktop bounds.
+ */
+static void dicon_snap_to_grid(int px, int py, int* out_col, int* out_row) {
+    int desk_h = screen_height - XGUI_PANEL_HEIGHT;
+    int max_rows = (desk_h - DICON_PAD_Y) / (DICON_H + DICON_PAD_Y);
+    if (max_rows < 1) max_rows = 1;
+    int max_cols = (screen_width - DICON_PAD_X) / (DICON_W + DICON_PAD_X);
+    if (max_cols < 1) max_cols = 1;
+
+    int col = (px - DICON_PAD_X + (DICON_W + DICON_PAD_X) / 2) / (DICON_W + DICON_PAD_X);
+    int row = (py - DICON_PAD_Y + (DICON_H + DICON_PAD_Y) / 2) / (DICON_H + DICON_PAD_Y);
+
+    if (col < 0) col = 0;
+    if (col >= max_cols) col = max_cols - 1;
+    if (row < 0) row = 0;
+    if (row >= max_rows) row = max_rows - 1;
+
+    *out_col = col;
+    *out_row = row;
+}
+
+/*
+ * Handle mouse move for desktop icons (drag + context menu hover).
+ */
+void xgui_desktop_icon_mouse_move(int x, int y) {
+    /* Drag handling */
+    if (dicon_dragging && dicon_drag_idx >= 0) {
+        /* Start drag only after moving a few pixels (avoids accidental drags) */
+        if (!dicon_drag_started) {
+            int dx = x - dicon_drag_start_mx;
+            int dy = y - dicon_drag_start_my;
+            if (dx < 0) dx = -dx;
+            if (dy < 0) dy = -dy;
+            if (dx > 4 || dy > 4) {
+                dicon_drag_started = true;
+                /* Cancel double-click once drag starts */
+                dicon_last_click_idx = -1;
+            }
+        }
+        if (dicon_drag_started) {
+            dicon_drag_px = x - dicon_drag_ox;
+            dicon_drag_py = y - dicon_drag_oy;
+        }
+    }
+
+    /* Context menu hover tracking */
+    if (dicon_ctx_visible) {
+        int mw = 160, mh = 24;
+        dicon_ctx_hover = (x >= dicon_ctx_x && x < dicon_ctx_x + mw &&
+                           y >= dicon_ctx_y && y < dicon_ctx_y + mh) ? 0 : -1;
+    }
+    if (smenu_ctx_visible) {
+        int mw = 180, mh = 24;
+        smenu_ctx_hover = (x >= smenu_ctx_x && x < smenu_ctx_x + mw &&
+                           y >= smenu_ctx_y && y < smenu_ctx_y + mh) ? 0 : -1;
+    }
+}
+
+/*
+ * Handle mouse up for desktop icon drag drop.
+ * Returns true if a drag was in progress and was completed.
+ */
+bool xgui_desktop_icon_mouse_up(int x, int y) {
+    (void)x; (void)y;
+    if (!dicon_dragging) return false;
+
+    if (dicon_drag_started && dicon_drag_idx >= 0 && dicons[dicon_drag_idx].used) {
+        /* Snap to nearest grid cell */
+        int new_col, new_row;
+        dicon_snap_to_grid(dicon_drag_px, dicon_drag_py, &new_col, &new_row);
+
+        /* Check if target cell is occupied by another icon — swap if so */
+        for (int i = 0; i < DICON_MAX; i++) {
+            if (i == dicon_drag_idx || !dicons[i].used) continue;
+            if (dicons[i].grid_col == new_col && dicons[i].grid_row == new_row) {
+                /* Swap positions */
+                dicons[i].grid_col = dicons[dicon_drag_idx].grid_col;
+                dicons[i].grid_row = dicons[dicon_drag_idx].grid_row;
+                break;
+            }
+        }
+
+        dicons[dicon_drag_idx].grid_col = new_col;
+        dicons[dicon_drag_idx].grid_row = new_row;
+        dicon_save();
+    }
+
+    dicon_dragging = false;
+    dicon_drag_started = false;
+    dicon_drag_idx = -1;
+    return true;
+}
+
+/*
+ * Check if any desktop popup menu or drag is active
+ */
+bool xgui_desktop_popup_visible(void) {
+    return dicon_ctx_visible || smenu_ctx_visible;
+}
+
+/*
+ * Check if a desktop icon drag is in progress
+ */
+bool xgui_desktop_dragging(void) {
+    return dicon_dragging;
+}
+
 /*
  * Handle panel click
  */
-bool xgui_panel_click(int x, int y) {
+bool xgui_panel_click(int x, int y, int button) {
     /* Check if click is in start menu area */
     if (start_menu_open) {
         int left_body = LEFT_COUNT * SMENU_ITEM_H;
@@ -852,6 +1433,16 @@ bool xgui_panel_click(int x, int y) {
         if (x >= menu_x && x < menu_x + SMENU_W && y >= menu_y && y < menu_y + menu_h) {
             int item = menu_hover_item;
             if (item < 0) return true; /* Click on empty area, keep open */
+
+            /* Right-click on an app item: show "Add Shortcut to Desktop" */
+            if (button == XGUI_MOUSE_RIGHT && item >= 0 && item < SMENU_APP_ID_COUNT) {
+                smenu_ctx_visible = true;
+                smenu_ctx_x = x;
+                smenu_ctx_y = y;
+                smenu_ctx_item = item;
+                smenu_ctx_hover = -1;
+                return true;
+            }
 
             start_menu_open = false;
 

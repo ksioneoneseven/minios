@@ -8,6 +8,7 @@
 #include "xgui/wm.h"
 #include "xgui/widget.h"
 #include "xgui/theme.h"
+#include "xgui/desktop.h"
 #include "vfs.h"
 #include "ramfs.h"
 #include "ext2.h"
@@ -45,9 +46,10 @@ static int scroll_offset = 0;
 /* Context menu state */
 #define CTX_MENU_W      180
 #define CTX_MENU_ITEM_H 20
-#define CTX_MENU_ITEMS  6
-#define CTX_MENU_SEP    3       /* separator after item index 2 (after Open with Paint) */
-#define CTX_MENU_H      (CTX_MENU_ITEM_H * CTX_MENU_ITEMS + 4 + 4) /* +4 for separator line */
+#define CTX_MENU_ITEMS  7
+#define CTX_MENU_SEP1   3       /* separator after item index 2 (after Open with Paint) */
+#define CTX_MENU_SEP2   6       /* separator after item index 5 (after Paste) */
+#define CTX_MENU_H      (CTX_MENU_ITEM_H * CTX_MENU_ITEMS + 4 + 4 + 4) /* +4 per separator line */
 
 static int ctx_menu_visible = 0;
 static int ctx_menu_x = 0;
@@ -640,11 +642,12 @@ static void explorer_paint(xgui_window_t* win) {
             "Open with Paint",
             "Cut",
             "Copy",
-            "Paste"
+            "Paste",
+            "Add Shortcut to Desktop"
         };
-        int sep_extra = 0;  /* extra Y offset after separator */
+        int sep_extra = 0;  /* extra Y offset after separators */
         for (int i = 0; i < CTX_MENU_ITEMS; i++) {
-            if (i == CTX_MENU_SEP) {
+            if (i == CTX_MENU_SEP1 || i == CTX_MENU_SEP2) {
                 /* Draw separator line */
                 int sy = my + 2 + i * CTX_MENU_ITEM_H + sep_extra;
                 xgui_win_hline(win, mx + 4, sy, CTX_MENU_W - 8, XGUI_DARK_GRAY);
@@ -707,15 +710,23 @@ static void explorer_handler(xgui_window_t* win, xgui_event_t* event) {
         ctx_menu_hover = -1;
         if (mx >= cmx && mx < cmx + CTX_MENU_W && my >= cmy + 2) {
             int rel_y = my - cmy - 2;
-            /* Items 0-2 are before separator, items 3-5 are after (+4px gap) */
-            if (rel_y < CTX_MENU_SEP * CTX_MENU_ITEM_H) {
+            /* Items 0-2 before sep1, items 3-5 between sep1 and sep2, item 6 after sep2 */
+            if (rel_y < CTX_MENU_SEP1 * CTX_MENU_ITEM_H) {
                 int idx = rel_y / CTX_MENU_ITEM_H;
-                if (idx >= 0 && idx < CTX_MENU_SEP) ctx_menu_hover = idx;
+                if (idx >= 0 && idx < CTX_MENU_SEP1) ctx_menu_hover = idx;
+            } else if (rel_y < CTX_MENU_SEP1 * CTX_MENU_ITEM_H + 4) {
+                /* In separator gap */
             } else {
-                int adj_y = rel_y - 4; /* subtract separator gap */
-                if (adj_y >= CTX_MENU_SEP * CTX_MENU_ITEM_H) {
+                int adj_y = rel_y - 4; /* subtract first separator gap */
+                if (adj_y < CTX_MENU_SEP2 * CTX_MENU_ITEM_H) {
                     int idx = adj_y / CTX_MENU_ITEM_H;
-                    if (idx >= CTX_MENU_SEP && idx < CTX_MENU_ITEMS) ctx_menu_hover = idx;
+                    if (idx >= CTX_MENU_SEP1 && idx < CTX_MENU_SEP2) ctx_menu_hover = idx;
+                } else if (adj_y < CTX_MENU_SEP2 * CTX_MENU_ITEM_H + 4) {
+                    /* In second separator gap */
+                } else {
+                    int adj_y2 = adj_y - 4; /* subtract second separator gap */
+                    int idx = adj_y2 / CTX_MENU_ITEM_H;
+                    if (idx >= CTX_MENU_SEP2 && idx < CTX_MENU_ITEMS) ctx_menu_hover = idx;
                 }
             }
         }
@@ -740,17 +751,21 @@ static void explorer_handler(xgui_window_t* win, xgui_event_t* event) {
 
             if (mx >= cmx && mx < cmx + CTX_MENU_W && my >= cmy + 2 &&
                 event->mouse.button == XGUI_MOUSE_LEFT) {
-                /* Determine which item was clicked (separator-aware) */
+                /* Determine which item was clicked (two-separator-aware) */
                 int rel_y = my - cmy - 2;
                 int item = -1;
-                if (rel_y < CTX_MENU_SEP * CTX_MENU_ITEM_H) {
+                if (rel_y < CTX_MENU_SEP1 * CTX_MENU_ITEM_H) {
                     int idx = rel_y / CTX_MENU_ITEM_H;
-                    if (idx >= 0 && idx < CTX_MENU_SEP) item = idx;
+                    if (idx >= 0 && idx < CTX_MENU_SEP1) item = idx;
                 } else {
                     int adj_y = rel_y - 4;
-                    if (adj_y >= CTX_MENU_SEP * CTX_MENU_ITEM_H) {
+                    if (adj_y < CTX_MENU_SEP2 * CTX_MENU_ITEM_H) {
                         int idx = adj_y / CTX_MENU_ITEM_H;
-                        if (idx >= CTX_MENU_SEP && idx < CTX_MENU_ITEMS) item = idx;
+                        if (idx >= CTX_MENU_SEP1 && idx < CTX_MENU_SEP2) item = idx;
+                    } else {
+                        int adj_y2 = adj_y - 4;
+                        int idx = adj_y2 / CTX_MENU_ITEM_H;
+                        if (idx >= CTX_MENU_SEP2 && idx < CTX_MENU_ITEMS) item = idx;
                     }
                 }
                 if (item >= 0 && ctx_menu_index >= 0 && ctx_menu_index < entry_count) {
@@ -789,6 +804,10 @@ static void explorer_handler(xgui_window_t* win, xgui_event_t* event) {
                                 }
                             }
                             break;
+                        case 6: /* Add Shortcut to Desktop */
+                            xgui_desktop_add_icon(DICON_TYPE_FILE,
+                                                  entries[ctx_menu_index].name, path);
+                            break;
                     }
                 }
             }
@@ -824,13 +843,12 @@ static void explorer_handler(xgui_window_t* win, xgui_event_t* event) {
             }
         }
 
-        /* Right-click on a file: show context menu */
+        /* Right-click on a file or directory: show context menu */
         if (event->mouse.button == XGUI_MOUSE_RIGHT) {
             if (mx >= 6 && mx < win->client_width - 20 &&
                 my >= list_y && my < list_y + visible_items * ITEM_HEIGHT) {
                 int clicked_item = (my - list_y) / ITEM_HEIGHT + scroll_offset;
-                if (clicked_item >= 0 && clicked_item < entry_count &&
-                    !entries[clicked_item].is_dir) {
+                if (clicked_item >= 0 && clicked_item < entry_count) {
                     selected_index = clicked_item;
                     ctx_menu_visible = 1;
                     ctx_menu_x = mx;
@@ -983,4 +1001,14 @@ void xgui_explorer_create(void) {
 
     /* Load initial directory */
     load_directory("/");
+}
+
+/*
+ * Open the File Explorer at a specific directory path
+ */
+void xgui_explorer_open_path(const char* path) {
+    xgui_explorer_create();
+    if (explorer_window && path && path[0]) {
+        load_directory(path);
+    }
 }
