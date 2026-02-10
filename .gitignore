@@ -1,0 +1,40 @@
+# Build artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.elf
+*.bin
+*.iso
+*.map
+*.d
+*.log
+
+# OS images (generated)
+hda.img
+
+# Common temp files
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# WSL/Windows metadata
+*.Zone.Identifier
+
+# Build directories (keep build/Makefile tracked; ignore outputs)
+/build/*.o
+/build/*.bin
+/build/*.iso
+/build/kernel.bin
+/build/userland/
+
+# Userland build outputs
+/userland/*.o
+/userland/*.a
+/userland/bin/*
+!userland/bin/*.c
+
+# Kernel build outputs (if any get created)
+/kernel/**/*.o
